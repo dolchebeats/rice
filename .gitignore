@@ -30,3 +30,21 @@
 *.exe
 *.out
 *.app
+
+# CMake builds
+/build/
+/cmake-build-*/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+
+# Binary outputs
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+
+# JUCE generated files
+JuceLibraryCode/

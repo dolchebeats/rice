@@ -1,162 +1,123 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "GrainTiming.h"
+#include <algorithm>
+#include <cmath>
 
-//==============================================================================
+juce::AudioProcessorValueTreeState::ParameterLayout AudioPluginAudioProcessor::createParameters()
+{
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+    juce::StringArray divisions;
+    for (const auto& division : rice::divisions())
+        divisions.add (division.name);
+    const auto milliseconds = []
+    {
+        juce::NormalisableRange<float> range (1.0f, 1000.0f, 0.1f);
+        range.setSkewForCentre (100.0f);
+        return range;
+    };
+    const auto msAttributes = juce::AudioParameterFloatAttributes()
+        .withStringFromValueFunction ([] (float value, int) { return juce::String (value, 1) + " ms"; })
+        .withValueFromStringFunction ([] (const juce::String& text) { return text.getFloatValue(); });
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "sizeMode", 1 }, "Grain size mode", juce::StringArray { "Milliseconds", "Tempo sync" }, 0));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "sizeMs", 1 }, "Grain size (ms)", milliseconds(), 100.0f, msAttributes));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "sizeSync", 1 }, "Grain size (sync)", divisions, rice::divisionIndex ("1/16")));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "captureMode", 1 }, "Capture mode", juce::StringArray { "Milliseconds", "Tempo sync", "Transient" }, 0));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "captureMs", 1 }, "Capture interval (ms)", milliseconds(), 250.0f, msAttributes));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "captureSync", 1 }, "Capture interval (sync)", divisions, rice::divisionIndex ("1/4")));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "sensitivity", 1 }, "Transient sensitivity", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 50.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float value, int) { return juce::String (value, 1) + " %"; })
+            .withValueFromStringFunction ([] (const juce::String& text) { return text.getFloatValue(); })));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "repeat", 1 }, "Repeat mode", juce::StringArray { "Straight", "Reverse", "Back-and-forth" }, 0));
+    return layout;
+}
+
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       )
+    : AudioProcessor (BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                                      .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+      parameters (*this, nullptr, "RiceParameters", createParameters())
 {
+    const std::array<const char*, 8> ids { "sizeMode", "sizeMs", "sizeSync", "captureMode", "captureMs", "captureSync", "sensitivity", "repeat" };
+    for (size_t i = 0; i < ids.size(); ++i)
+        values[i] = parameters.getRawParameterValue (ids[i]);
 }
 
-AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
+void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int)
 {
+    rate = sampleRate;
+    engine.prepare (rate);
+    previousSizeMode = previousSizeValue = -1.0f;
 }
 
-//==============================================================================
-const juce::String AudioPluginAudioProcessor::getName() const
+void AudioPluginAudioProcessor::reset()
 {
-    return JucePlugin_Name;
-}
-
-bool AudioPluginAudioProcessor::acceptsMidi() const
-{
-   #if JucePlugin_WantsMidiInput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool AudioPluginAudioProcessor::producesMidi() const
-{
-   #if JucePlugin_ProducesMidiOutput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool AudioPluginAudioProcessor::isMidiEffect() const
-{
-   #if JucePlugin_IsMidiEffect
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-double AudioPluginAudioProcessor::getTailLengthSeconds() const
-{
-    return 0.0;
-}
-
-int AudioPluginAudioProcessor::getNumPrograms()
-{
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
-}
-
-int AudioPluginAudioProcessor::getCurrentProgram()
-{
-    return 0;
-}
-
-void AudioPluginAudioProcessor::setCurrentProgram (int index)
-{
-    juce::ignoreUnused (index);
-}
-
-const juce::String AudioPluginAudioProcessor::getProgramName (int index)
-{
-    juce::ignoreUnused (index);
-    return {};
-}
-
-void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String& newName)
-{
-    juce::ignoreUnused (index, newName);
-}
-
-//==============================================================================
-void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
-{
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
-    juce::ignoreUnused (sampleRate, samplesPerBlock);
-}
-
-void AudioPluginAudioProcessor::releaseResources()
-{
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
+    engine.reset();
+    displayCaptureCount.store (0, std::memory_order_relaxed);
 }
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-  #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
-    return true;
-  #else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-
-    // This checks if the input layout matches the output layout
-   #if ! JucePlugin_IsSynth
-    if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
-        return false;
-   #endif
-
-    return true;
-  #endif
+    return (layouts.getMainOutputChannelSet() == juce::AudioChannelSet::mono()
+         || layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo())
+        && layouts.getMainInputChannelSet() == layouts.getMainOutputChannelSet();
 }
 
-void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
-                                              juce::MidiBuffer& midiMessages)
+void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    juce::ignoreUnused (midiMessages);
-
+    juce::ignoreUnused (midi);
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
-
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    if (buffer.getNumChannels() == 0)
+        return;
+    double bpm = 120.0, ppq = 0.0;
+    bool hostTempo = false, followHost = false;
+    if (auto* hostPlayHead = getPlayHead())
+        if (const auto position = hostPlayHead->getPosition())
+        {
+            if (const auto tempo = position->getBpm(); tempo && std::isfinite (*tempo) && *tempo > 0.0)
+            {
+                bpm = std::clamp (*tempo, 20.0, 999.0);
+                hostTempo = true;
+            }
+            if (const auto beats = position->getPpqPosition(); beats && std::isfinite (*beats))
+            {
+                ppq = *beats;
+                followHost = hostTempo && position->getIsPlaying();
+            }
+        }
+    displayBpm.store (bpm, std::memory_order_relaxed);
+    usingHostTempo.store (hostTempo, std::memory_order_relaxed);
+    const auto load = [this] (size_t index) { return values[index]->load (std::memory_order_relaxed); };
+    const auto sizeMode = load (0);
+    const auto sizeValue = sizeMode < 0.5f ? load (1) : load (2);
+    if (sizeMode != previousSizeMode || sizeValue != previousSizeValue)
     {
-        auto* channelData = buffer.getWritePointer (channel);
-        juce::ignoreUnused (channelData);
-        // ..do something to the data...
+        engine.cancelPendingCaptures();
+        previousSizeMode = sizeMode;
+        previousSizeValue = sizeValue;
     }
-}
-
-//==============================================================================
-bool AudioPluginAudioProcessor::hasEditor() const
-{
-    return true; // (change this to false if you choose to not supply an editor)
+    const auto grainMs = sizeMode < 0.5f ? static_cast<double> (sizeValue)
+                                       : rice::millisecondsForDivision (juce::roundToInt (sizeValue), bpm);
+    const auto captureMode = juce::roundToInt (load (3));
+    const auto syncIndex = juce::jlimit (0, 29, juce::roundToInt (load (5)));
+    const auto intervalMs = captureMode == 1 ? rice::millisecondsForDivision (syncIndex, bpm) : static_cast<double> (load (4));
+    rice::GrainEngine::Settings settings;
+    settings.grainSamples = juce::roundToInt (grainMs * rate * 0.001);
+    settings.intervalSamples = intervalMs * rate * 0.001;
+    settings.intervalBeats = rice::divisions()[static_cast<size_t> (syncIndex)].beats;
+    settings.sensitivity = load (6) * 0.01f;
+    settings.repeat = static_cast<rice::GrainEngine::Repeat> (juce::jlimit (0, 2, juce::roundToInt (load (7))));
+    settings.capture = static_cast<rice::GrainEngine::Capture> (juce::jlimit (0, 2, captureMode));
+    engine.beginBlock (settings, ppq, bpm / (60.0 * rate), followHost);
+    auto* left = buffer.getWritePointer (0);
+    auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
+    for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+    {
+        const auto result = engine.process ({ left[sample], right != nullptr ? right[sample] : left[sample] });
+        left[sample] = result[0];
+        if (right != nullptr)
+            right[sample] = result[1];
+    }
+    displayCaptureCount.store (engine.getCaptureCount(), std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
@@ -164,24 +125,19 @@ juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
     return new AudioPluginAudioProcessorEditor (*this);
 }
 
-//==============================================================================
-void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& data)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-    juce::ignoreUnused (destData);
+    if (auto xml = parameters.copyState().createXml())
+        copyXmlToBinary (*xml, data);
 }
 
-void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+void AudioPluginAudioProcessor::setStateInformation (const void* data, int size)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
-    juce::ignoreUnused (data, sizeInBytes);
+    if (auto xml = getXmlFromBinary (data, size))
+        if (xml->hasTagName (parameters.state.getType()))
+            parameters.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
-//==============================================================================
-// This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new AudioPluginAudioProcessor();

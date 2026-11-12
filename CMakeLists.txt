@@ -20,25 +20,37 @@ juce_add_plugin(rice
     FORMATS VST3 Standalone
     PRODUCT_NAME "rice"
     PLUGIN_NAME "rice"
-    DESCRIPTION "Granular delay, reverb and glitch effect"
+    DESCRIPTION "Granular capture and repeat effect"
 
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
 
-    VST3_CATEGORIES Fx Delay Reverb
+    VST3_CATEGORIES Fx Delay
 
     COPY_PLUGIN_AFTER_BUILD FALSE
 )
 
 # Source files
 target_sources(rice PRIVATE
-    Source/PluginProcessor.cpp
-    Source/PluginProcessor.h
-    Source/PluginEditor.cpp
-    Source/PluginEditor.h
+    src/GrainEngine.cpp
+    src/GrainEngine.h
+    src/GrainTiming.h
+    src/PluginProcessor.cpp
+    src/PluginProcessor.h
+    src/PluginEditor.cpp
+    src/PluginEditor.h
 )
+
+# Offline audio checks
+option(RICE_BUILD_TESTS "Build the offline grain engine checks" OFF)
+if(RICE_BUILD_TESTS)
+    enable_testing()
+    add_executable(rice_engine_tests tests/GrainEngineTests.cpp src/GrainEngine.cpp)
+    target_include_directories(rice_engine_tests PRIVATE src)
+    add_test(NAME rice_engine_tests COMMAND rice_engine_tests)
+endif()
 
 # JUCE modules
 target_link_libraries(rice

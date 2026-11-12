@@ -29,7 +29,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     }
     sizeKnob.setName ("Grain size");
     captureKnob.setName ("Capture interval or transient sensitivity");
-    sizeKnob.setTooltip ("Length of each recorded grain. New grains play once recording is complete.");
+    sizeKnob.setTooltip ("Length of each recorded grain. Hear the first pass live, then repeat it in the selected direction.");
     captureKnob.setTooltip ("Time between capture starts. In Transient mode, higher sensitivity detects quieter attacks.");
     sizeMode.addItemList ({ "Milliseconds", "Tempo sync" }, 1);
     captureMode.addItemList ({ "Milliseconds", "Tempo sync", "Transient" }, 1);

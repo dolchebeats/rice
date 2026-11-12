@@ -48,3 +48,6 @@
 
 # JUCE generated files
 JuceLibraryCode/
+
+# Local JUCE dependency
+/JUCE/

@@ -21,7 +21,7 @@ public:
     void prepare (double sampleRate);
     void reset();
     void cancelPendingCaptures();
-    void beginBlock (const Settings&, double ppq, double beatsPerSample, bool followHost);
+    void beginBlock (const Settings&, double ppq, double beatsPerSample, bool followHost, bool transportPlaying = true);
     std::array<float, 2> process (std::array<float, 2> input);
     std::uint64_t getCaptureCount() const noexcept { return captureCount; }
     int getActiveLength() const noexcept { return voices[currentVoice].length; }
@@ -55,9 +55,11 @@ private:
     float fastEnvelope = 0.0f, slowEnvelope = 0.0f;
     float fastAttack = 0.0f, fastRelease = 0.0f, slowAttack = 0.0f, slowRelease = 0.0f;
     float transientRatio = 3.1f, transientFloor = 0.003f;
+    float liveMix = 0.0f;
     int capacity = 0, maximumGrain = 0, writePosition = 0, currentVoice = 0;
     int fadeLength = 1, fadeRemaining = 0, transientHoldoff = 0;
     bool hostSync = false, wasHostSync = false, firstBlock = true, forceCapture = true, transientArmed = true;
-    std::uint64_t clock = 0, captureCount = 0;
+    bool suspended = false;
+    std::uint64_t clock = 0, captureCount = 0, liveUntil = 0;
 };
 }

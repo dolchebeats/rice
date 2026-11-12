@@ -69,10 +69,11 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     if (buffer.getNumChannels() == 0)
         return;
     double bpm = 120.0, ppq = 0.0;
-    bool hostTempo = false, followHost = false;
+    bool hostTempo = false, followHost = false, transportPlaying = true;
     if (auto* hostPlayHead = getPlayHead())
         if (const auto position = hostPlayHead->getPosition())
         {
+            transportPlaying = position->getIsPlaying() || position->getIsRecording();
             if (const auto tempo = position->getBpm(); tempo && std::isfinite (*tempo) && *tempo > 0.0)
             {
                 bpm = std::clamp (*tempo, 20.0, 999.0);
@@ -107,7 +108,7 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     settings.sensitivity = load (6) * 0.01f;
     settings.repeat = static_cast<rice::GrainEngine::Repeat> (juce::jlimit (0, 2, juce::roundToInt (load (7))));
     settings.capture = static_cast<rice::GrainEngine::Capture> (juce::jlimit (0, 2, captureMode));
-    engine.beginBlock (settings, ppq, bpm / (60.0 * rate), followHost);
+    engine.beginBlock (settings, ppq, bpm / (60.0 * rate), followHost, transportPlaying);
     auto* left = buffer.getWritePointer (0);
     auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
     for (int sample = 0; sample < buffer.getNumSamples(); ++sample)

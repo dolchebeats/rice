@@ -43,7 +43,7 @@ void playbackOrder()
         for (int i = 0; i < 150000; ++i)
         {
             const auto expected = mode == rice::GrainEngine::Repeat::straight ? i % 4 + 1
-                : mode == rice::GrainEngine::Repeat::reverse ? 4 - i % 4 : pingPong[i % 6];
+                : mode == rice::GrainEngine::Repeat::reverse ? 4 - i % 4 : pingPong[(i + 4) % 6];
             const auto out = engine.process ({ 0.0f, 0.0f });
             checkNear (out[0], expected, "Playback direction and held snapshot");
             checkNear (out[1], -2 * expected, "Stereo channels share timing, preserve audio");
@@ -108,6 +108,64 @@ void hostScheduling()
     check (engine.getCaptureCount() == 2, "Tempo ramps do not introduce extra block-rate captures");
 }
 
+void transportAndLivePass()
+{
+    for (const auto mode : { rice::GrainEngine::Repeat::straight, rice::GrainEngine::Repeat::reverse, rice::GrainEngine::Repeat::pingPong })
+    {
+        rice::GrainEngine engine;
+        engine.prepare (1000.0); // One-sample de-click fades make sample order exact.
+        rice::GrainEngine::Settings settings;
+        settings.grainSamples = 4;
+        settings.intervalSamples = 20.0;
+        settings.repeat = mode;
+        engine.beginBlock (settings, 0.0, 0.0, false);
+        for (int i = 0; i < 20; ++i)
+            engine.process ({ 0.25f, -0.25f });
+        // The second capture must be audible immediately, even with an old loop.
+        for (int i = 0; i < 4; ++i)
+        {
+            const auto out = engine.process ({ static_cast<float> (i + 1), static_cast<float> (-i - 1) });
+            checkNear (out[0], i + 1, "Every capture has an immediate live first pass");
+            checkNear (out[1], -i - 1, "Live first pass preserves stereo without summing dry and wet");
+        }
+        const auto next = engine.process ({ 99.0f, 99.0f });
+        checkNear (next[0], mode == rice::GrainEngine::Repeat::straight ? 1.0 : mode == rice::GrainEngine::Repeat::reverse ? 4.0 : 3.0,
+                   "After the live pass, playback follows the selected repeat mode");
+        settings.capture = rice::GrainEngine::Capture::transient;
+        engine.beginBlock (settings, 0.0, 0.0, false, false);
+        for (int block = 0; block < 10; ++block)
+        {
+            engine.beginBlock (settings, 0.0, 0.0, false, false);
+            for (int i = 0; i < 100; ++i)
+            {
+                const auto out = engine.process ({ 0.75f, -0.75f });
+                checkNear (out[0], 0.0, "Stopped transport silences the grain and live path");
+                checkNear (out[1], 0.0, "Stopped transport silences both channels");
+            }
+        }
+        check (engine.getCaptureCount() == 0 && engine.getActiveLength() == 0, "Stop clears held and pending captures");
+        engine.beginBlock (settings, 0.0, 0.0, false, true);
+        for (int i = 0; i < 4; ++i)
+            checkNear (engine.process ({ 0.5f, -0.5f })[0], 0.5, "Restart uses fresh live input");
+        for (int i = 0; i < 12; ++i)
+            check (std::abs (engine.process ({ 0.0f, 0.0f })[0]) <= 0.50001f, "Old grains never return after restart");
+    }
+
+    // Stop before the first recording completes: nothing may activate on restart.
+    rice::GrainEngine engine;
+    engine.prepare (1000.0);
+    rice::GrainEngine::Settings settings;
+    settings.grainSamples = 100;
+    settings.capture = rice::GrainEngine::Capture::transient;
+    engine.beginBlock (settings, 0.0, 0.0, false);
+    for (int i = 0; i < 50; ++i)
+        engine.process ({ 0.7f, 0.7f });
+    engine.beginBlock (settings, 0.0, 0.0, false, false);
+    engine.beginBlock (settings, 0.0, 0.0, false, true);
+    for (int i = 0; i < 250; ++i)
+        checkNear (engine.process ({ 0.0f, 0.0f })[0], 0.0, "Stop discards unfinished recordings");
+}
+
 std::uint64_t transientCount (float sensitivity, bool pulses)
 {
     rice::GrainEngine engine;
@@ -166,6 +224,7 @@ int main()
     playbackOrder();
     overlappingCaptures();
     hostScheduling();
+    transportAndLivePass();
     timingAndEdges();
     std::cout << "All grain-engine checks passed.\n";
 }

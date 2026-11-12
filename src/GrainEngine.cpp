@@ -27,8 +27,8 @@ void GrainEngine::prepare (double sampleRate)
 
 void GrainEngine::reset()
 {
-    for (auto& channel : history)
-        std::fill (channel.begin(), channel.end(), 0.0f);
+    // Invalidate references instead of clearing large buffers on a transport edge.
+    // Every new grain is fully recorded before a history snapshot can be read.
     for (auto& voice : voices)
         voice.length = voice.copied = voice.phase = 0;
     pending.clear();
@@ -38,6 +38,9 @@ void GrainEngine::reset()
     fastEnvelope = slowEnvelope = 0.0f;
     firstBlock = forceCapture = transientArmed = true;
     hostSync = wasHostSync = false;
+    suspended = false;
+    liveUntil = 0;
+    liveMix = 0.0f;
 }
 
 void GrainEngine::cancelPendingCaptures()
@@ -46,8 +49,19 @@ void GrainEngine::cancelPendingCaptures()
     forceCapture = true;
 }
 
-void GrainEngine::beginBlock (const Settings& next, double ppq, double beatsPerSample, bool followHost)
+void GrainEngine::beginBlock (const Settings& next, double ppq, double beatsPerSample, bool followHost, bool transportPlaying)
 {
+    if (! transportPlaying)
+    {
+        if (! suspended)
+        {
+            reset();
+            suspended = true;
+        }
+        return;
+    }
+    if (suspended)
+        reset();
     if (next.capture != settings.capture)
         pending.clear();
     if (next.capture != settings.capture
@@ -106,6 +120,7 @@ void GrainEngine::requestCapture()
         return;
     pending.push_back ({ clock + static_cast<std::uint64_t> (settings.grainSamples), writePosition, settings.grainSamples });
     std::push_heap (pending.begin(), pending.end());
+    liveUntil = clock + static_cast<std::uint64_t> (settings.grainSamples);
 }
 
 void GrainEngine::activate (const Pending& capture)
@@ -117,6 +132,9 @@ void GrainEngine::activate (const Pending& capture)
     voice.copied = voice.phase = 0;
     voice.modeFadeRemaining = 0;
     voice.repeat = settings.repeat;
+    // The forward traversal was already heard live. Reflect without replaying it.
+    if (voice.repeat == Repeat::pingPong)
+        voice.phase = voice.length % (2 * (voice.length - 1));
     fadeRemaining = fadeLength;
     ++captureCount;
 }
@@ -176,6 +194,8 @@ std::array<float, 2> GrainEngine::render (Voice& voice)
 
 std::array<float, 2> GrainEngine::process (std::array<float, 2> input)
 {
+    if (suspended)
+        return {};
     for (size_t channel = 0; channel < input.size(); ++channel)
     {
         if (! std::isfinite (input[channel]))
@@ -228,6 +248,13 @@ std::array<float, 2> GrainEngine::process (std::array<float, 2> input)
             result[channel] = previous[channel] + mix * (result[channel] - previous[channel]);
         --fadeRemaining;
     }
+    // An exclusive live first pass preserves attack timing without doubling the
+    // signal. Keep rendering the held voices underneath so their caches advance.
+    const auto liveStep = 1.0f / static_cast<float> (fadeLength);
+    liveMix = clock < liveUntil ? std::min (1.0f, liveMix + liveStep)
+                               : std::max (0.0f, liveMix - liveStep);
+    for (size_t channel = 0; channel < result.size(); ++channel)
+        result[channel] += liveMix * (input[channel] - result[channel]);
     writePosition = (writePosition + 1) % capacity;
     ++clock;
     ppqPosition += ppqStep;

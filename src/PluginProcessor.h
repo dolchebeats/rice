@@ -37,7 +37,7 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameters();
     rice::GrainEngine engine;
-    std::array<std::atomic<float>*, 8> values {};
+    std::array<std::atomic<float>*, 19> values {};
     double rate = 44100.0;
     float previousSizeMode = -1.0f, previousSizeValue = -1.0f;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)

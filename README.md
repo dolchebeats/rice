@@ -8,12 +8,21 @@ A JUCE VST3 / standalone granular capture-and-repeat effect. This first version 
 - **Capture interval:** time between the starts of new recordings, independently set to 1-1,000 ms or a synced note length. Shorter intervals refresh more often. Recording windows can overlap when the interval is shorter than the grain.
 - **Transient capture:** select Transient in the capture dropdown; the second knob becomes sensitivity. Higher percentages detect quieter attacks. A stereo-linked fast/slow envelope detector includes a noise floor, re-arming, and a 15 ms holdoff to avoid triggering repeatedly on one attack.
 - **Repeat:** Straight loops forward; Reverse loops backward; Back-and-forth alternates direction across the entire grain without jumping between its ends.
+- **Voices:** 1-16 independent capture/repeat voices, default 1. The mix is normalised, including voices fading out during automation, so unison does not multiply the peak level.
+- **Spread:** 0-100% stereo distribution, with voices spaced evenly left to right using equal-power stereo balance. A single voice stays centered. Stereo source channels are preserved; mono hosts receive a fold-down of both sides.
+- **Random Size:** draw a fresh uniform signed size offset per voice and capture, within +/- the selected amount.
+- **Random Interval:** draw a fresh uniform signed interval offset per voice for each timed capture. In Transient mode, it instead jitters the capture source around each detected attack independently per voice (negative jitter uses earlier buffered audio; positive jitter waits).
+- **Random Position:** draw a fresh uniform signed source-position offset per voice and capture. Negative offsets read earlier input history; positive offsets wait for later input to arrive. At startup, earlier positions clamp to the beginning of the current transport run.
+
+Each random knob has its own Milliseconds / Tempo sync dropdown. Millisecond amounts range from 0 to 1,000 ms; synced amounts include Off plus the same divisions, triplets and dotted values as grain size. They specify the maximum signed variation, not a new base value. All randomness defaults to 0 / Off, and switching units remembers both amounts. Amount edits apply on subsequent captures; a new random draw is made for each voice each time, using separate deterministic pseudo-random streams (transport restart repeats the streams).
+
+Randomised grain lengths clamp to 1 ms-72 seconds, and timed intervals clamp to at least 1 ms. Total position displacement, including transient timing jitter, clamps to +/-72 seconds. These limits protect the preallocated buffers; large amounts can hit them. A +/-20 ms size amount on a 100 ms grain produces lengths from 80 to 120 ms. Identical voices with all randomness off remain identical, so spreading them alone does not decorrelate mono audio.
 
 Both sync knobs contain `1/32`, `1/16`, `1/8`, `1/6`, `1/4`, `1/2`, `1`, `2`, `3`, and `4`, each with triplet (`T`, two-thirds length) and dotted (`D`, one-and-a-half length) variants. Values are sorted by duration; some labels intentionally have the same duration. `1` means one whole note (four quarter-note beats), regardless of time signature.
 
 ## Capture behavior
 
-A trigger begins recording fresh incoming audio and plays that first pass live. It replaces the old loop during this pass, rather than adding dry audio to it. After the selected grain duration has elapsed, the recording repeats in the selected direction. One initial capture starts automatically, including in Transient mode.
+A trigger begins recording fresh incoming audio and plays that first pass live, independently per voice. It replaces that voice's old loop during this pass, rather than adding dry audio to it. Random Position shifts the source of this pass as well as its recorded repeats: past positions are available immediately; future positions wait while the existing grain continues (or silence before the first grain). After the selected grain duration has elapsed, the recording repeats in the selected direction. One initial capture per voice starts automatically, including in Transient mode.
 
 For example, with a 100 ms size and 250 ms interval, recordings start and are heard live at 0, 250, 500 ms. Repeats begin at 100, 350, 600 ms. Straight wraps to the beginning; Back-and-forth turns back from the end immediately after its live forward pass. Reverse also has a live forward first pass, then loops the complete recording backward. Reversing audio that has not yet arrived is impossible without lookahead, so this live bridge is the intentional low-latency compromise. There is no grain-length delay on the first pass and no reported plugin latency. Fixed de-click crossfades take up to 0.5 ms.
 
@@ -25,15 +34,15 @@ Size edits discard unfinished captures and begin a recording at the new size. Ca
 
 Mono and stereo layouts are supported. Stereo audio retains its channels, with linked timing and detection. All controls support host automation and are saved with the session; recorded audio is temporary. In Transient mode the last grain can repeat indefinitely while the transport plays without further triggers, and the VST3 reports an infinite tail accordingly. The host must deliver a transport-stopped processing block for the plugin to clear playback.
 
-Memory is preallocated in `prepareToPlay`, including space for long synced grains (approximately 106 MiB of audio buffers at 48 kHz). The audio callback allocates no grain buffers and copies snapshots incrementally to keep capture work bounded.
+Memory is allocated in `prepareToPlay`, with one shared stereo input history for all voices (about 79 MiB at 48 kHz). Per-voice snapshot arrays are allocated without initialising unused samples; only active grain data is written. Supporting 16 voices at the maximum 72-second grain length reserves approximately 959 MiB of buffers and event storage at 48 kHz, doubling at 96 kHz for audio storage. Short grains touch much less snapshot memory. The audio callback allocates no grain buffers and copies snapshots incrementally to keep capture work bounded.
 
 ## Build on Windows
 
-Requires the included `JUCE` directory, CMake 3.22+, and Visual Studio 2022 with the C++ desktop workload and a Windows SDK.
+Requires a local JUCE checkout in `JUCE/` (ignored by Git), CMake 3.22+, and Visual Studio 2022 with the C++ desktop workload and a Windows SDK.
 
 ```powershell
 cmake -S . -B build -DRICE_BUILD_TESTS=ON
-cmake --build build --config Debug --target rice_VST3 rice_Standalone rice_engine_tests --parallel 4
+cmake --build build --config Debug --target rice_VST3 rice_Standalone rice_engine_tests rice_plugin_tests --parallel 4
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
@@ -48,4 +57,4 @@ Try a drum loop with a 50-100 ms grain, a synced `1/8` capture interval, and Bac
 
 ## Validation
 
-The offline engine checks exercise forward/reverse/ping-pong sample order, live first passes on subsequent captures, transport stop/restart (including unfinished recordings), persistent snapshots after history wraparound, independent stereo audio, overlapping 1 ms captures with a 1,000 ms grain, host PPQ boundaries across blocks, seeks and tempo ramps, triplet/dotted conversions, transient sensitivity and re-arming, reset, 1 ms grains at 44.1/96 kHz, and nonfinite input handling. Listening and DAW-specific automation testing remain necessary when evaluating the sound.
+The offline engine checks cover the original playback/transport/timing behavior plus 16-voice normalisation, voice-count automation, independent signed random draws, position-shifted source audio, stereo spread, random sync timing through tempo ramps, and clearing history on stop/restart. Plugin integration checks exercise parameter/state restoration (including older sessions), transport forwarding, seven visible knobs, and random-knob unit rebinding. They also render `build/rice-ui.png` for visual inspection. Listening and DAW-specific automation testing remain necessary when evaluating the sound.

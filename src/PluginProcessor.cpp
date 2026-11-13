@@ -29,6 +29,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudioPluginAudioProcessor::c
         juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float value, int) { return juce::String (value, 1) + " %"; })
             .withValueFromStringFunction ([] (const juce::String& text) { return text.getFloatValue(); })));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "repeat", 1 }, "Repeat mode", juce::StringArray { "Straight", "Reverse", "Back-and-forth" }, 0));
+    layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { "voices", 1 }, "Voices", 1, 16, 1));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "spread", 1 }, "Spread", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float value, int) { return juce::String (value, 1) + " %"; })
+            .withValueFromStringFunction ([] (const juce::String& text) { return text.getFloatValue(); })));
+    juce::StringArray randomDivisions { "Off" };
+    randomDivisions.addArray (divisions);
+    for (const auto* prefix : { "randomSize", "randomInterval", "randomPosition" })
+    {
+        const juce::String id (prefix);
+        const auto name = id == "randomSize" ? "Random Size" : id == "randomInterval" ? "Random Interval" : "Random Position";
+        layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { id + "Mode", 1 }, juce::String (name) + " mode", juce::StringArray { "Milliseconds", "Tempo sync" }, 0));
+        juce::NormalisableRange<float> amountRange (0.0f, 1000.0f, 0.1f);
+        amountRange.setSkewForCentre (100.0f);
+        layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { id + "Ms", 1 }, juce::String (name) + " (ms)", amountRange, 0.0f, msAttributes));
+        layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { id + "Sync", 1 }, juce::String (name) + " (sync)", randomDivisions, 0));
+    }
     return layout;
 }
 
@@ -37,7 +53,9 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
                                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       parameters (*this, nullptr, "RiceParameters", createParameters())
 {
-    const std::array<const char*, 8> ids { "sizeMode", "sizeMs", "sizeSync", "captureMode", "captureMs", "captureSync", "sensitivity", "repeat" };
+    const std::array<const char*, 19> ids { "sizeMode", "sizeMs", "sizeSync", "captureMode", "captureMs", "captureSync", "sensitivity", "repeat",
+        "voices", "spread", "randomSizeMode", "randomSizeMs", "randomSizeSync", "randomIntervalMode", "randomIntervalMs", "randomIntervalSync",
+        "randomPositionMode", "randomPositionMs", "randomPositionSync" };
     for (size_t i = 0; i < ids.size(); ++i)
         values[i] = parameters.getRawParameterValue (ids[i]);
 }
@@ -108,13 +126,25 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     settings.sensitivity = load (6) * 0.01f;
     settings.repeat = static_cast<rice::GrainEngine::Repeat> (juce::jlimit (0, 2, juce::roundToInt (load (7))));
     settings.capture = static_cast<rice::GrainEngine::Capture> (juce::jlimit (0, 2, captureMode));
+    settings.voiceCount = juce::roundToInt (load (8));
+    settings.spread = load (9) * 0.01f;
+    const auto randomSamples = [&load, bpm, this] (size_t offset)
+    {
+        const auto index = juce::roundToInt (load (offset + 2));
+        const auto ms = load (offset) < 0.5f ? static_cast<double> (load (offset + 1))
+            : index == 0 ? 0.0 : rice::millisecondsForDivision (index - 1, bpm);
+        return ms * rate * 0.001;
+    };
+    settings.randomSizeSamples = randomSamples (10);
+    settings.randomIntervalSamples = randomSamples (13);
+    settings.randomPositionSamples = randomSamples (16);
     engine.beginBlock (settings, ppq, bpm / (60.0 * rate), followHost, transportPlaying);
     auto* left = buffer.getWritePointer (0);
     auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
     for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
     {
         const auto result = engine.process ({ left[sample], right != nullptr ? right[sample] : left[sample] });
-        left[sample] = result[0];
+        left[sample] = right != nullptr ? result[0] : 0.5f * (result[0] + result[1]);
         if (right != nullptr)
             right[sample] = result[1];
     }

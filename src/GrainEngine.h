@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace rice
@@ -8,6 +9,7 @@ namespace rice
 class GrainEngine
 {
 public:
+    static constexpr int maxVoices = 16;
     enum class Repeat { straight, reverse, pingPong };
     enum class Capture { milliseconds, synced, transient };
     struct Settings
@@ -17,6 +19,16 @@ public:
         float sensitivity = 0.5f;
         Repeat repeat = Repeat::straight;
         Capture capture = Capture::milliseconds;
+        int voiceCount = 1;
+        float spread = 0.0f;
+        double randomSizeSamples = 0.0, randomIntervalSamples = 0.0, randomPositionSamples = 0.0;
+    };
+    struct VoiceInfo
+    {
+        int length = 0;
+        std::int64_t positionOffset = 0;
+        double interval = 0.0;
+        std::uint64_t requests = 0;
     };
     void prepare (double sampleRate);
     void reset();
@@ -24,12 +36,15 @@ public:
     void beginBlock (const Settings&, double ppq, double beatsPerSample, bool followHost, bool transportPlaying = true);
     std::array<float, 2> process (std::array<float, 2> input);
     std::uint64_t getCaptureCount() const noexcept { return captureCount; }
-    int getActiveLength() const noexcept { return voices[currentVoice].length; }
+    int getActiveLength() const noexcept { return lanes[0].heads[lanes[0].current].length; }
+    VoiceInfo getVoiceInfo (int index) const noexcept { return lanes[static_cast<size_t> (index)].info; }
 
 private:
-    struct Voice
+    struct Head
     {
-        std::array<std::vector<float>, 2> cache;
+        // Uninitialised storage: only recorded samples are touched/read. Long sync
+        // settings reserve address space without eagerly filling every voice cache.
+        std::array<std::unique_ptr<float[]>, 2> cache;
         int start = 0, length = 0, copied = 0, phase = 0;
         Repeat repeat = Repeat::straight;
         int oldPhase = 0, modeFadeRemaining = 0;
@@ -41,25 +56,38 @@ private:
         int start, length;
         bool operator< (const Pending& other) const noexcept { return due > other.due; }
     };
-    void requestCapture();
-    void activate (const Pending&);
-    std::array<float, 2> render (Voice&);
-    float read (const Voice&, int channel, int index) const;
+    struct Lane
+    {
+        std::array<Head, 2> heads;
+        std::vector<Pending> pending;
+        int current = 0, fadeRemaining = 0;
+        double countdown = 0.0, nextBeat = 0.0;
+        std::uint64_t liveBegin = 0, liveUntil = 0, sourceStart = 0;
+        std::uint32_t rng = 1;
+        float liveMix = 0.0f, gainL = 0.0f, gainR = 0.0f, targetL = 0.0f, targetR = 0.0f;
+        bool force = true, enabled = false;
+        VoiceInfo info;
+    };
+    void clearLane (Lane&, int index);
+    double randomSigned (Lane&, double amount);
+    double nextInterval (Lane&);
+    void requestCapture (Lane&, double transientJitter = 0.0);
+    void activate (Lane&, const Pending&);
+    std::array<float, 2> render (Head&);
+    std::array<float, 2> renderLane (Lane&);
+    float read (const Head&, int channel, int index) const;
     bool detectTransient (float level);
     std::array<std::vector<float>, 2> history;
-    std::array<Voice, 2> voices;
-    std::vector<Pending> pending;
+    std::array<Lane, maxVoices> lanes;
     Settings settings;
-    double rate = 44100.0, countdown = 0.0, ppqPosition = 0.0, ppqStep = 0.0;
-    double expectedPpq = 0.0, lastGrid = 0.0;
+    double rate = 44100.0, ppqPosition = 0.0, ppqStep = 0.0, expectedPpq = 0.0, lastGrid = 0.0;
     float fastEnvelope = 0.0f, slowEnvelope = 0.0f;
     float fastAttack = 0.0f, fastRelease = 0.0f, slowAttack = 0.0f, slowRelease = 0.0f;
-    float transientRatio = 3.1f, transientFloor = 0.003f;
-    float liveMix = 0.0f;
-    int capacity = 0, maximumGrain = 0, writePosition = 0, currentVoice = 0;
-    int fadeLength = 1, fadeRemaining = 0, transientHoldoff = 0;
+    float transientRatio = 3.1f, transientFloor = 0.003f, gainSmoothing = 0.0f;
+    float normalisation = 1.0f;
+    int capacity = 0, maximumGrain = 0, writePosition = 0, fadeLength = 1, transientHoldoff = 0;
     bool hostSync = false, wasHostSync = false, firstBlock = true, forceCapture = true, transientArmed = true;
     bool suspended = false;
-    std::uint64_t clock = 0, captureCount = 0, liveUntil = 0;
+    std::uint64_t clock = 0, captureCount = 0;
 };
 }

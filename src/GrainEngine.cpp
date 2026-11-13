@@ -7,45 +7,65 @@ namespace rice
 void GrainEngine::prepare (double sampleRate)
 {
     rate = sampleRate > 0.0 ? sampleRate : 44100.0;
-    // Four dotted whole notes at 20 BPM = 72 seconds. Allocate off the audio thread.
     maximumGrain = static_cast<int> (std::ceil (rate * 72.0));
-    capacity = maximumGrain * 2 + 1;
+    // Negative position offset + recording + incremental snapshot copy.
+    capacity = maximumGrain * 3 + 1;
     for (auto& channel : history)
         channel.assign (static_cast<size_t> (capacity), 0.0f);
-    for (auto& voice : voices)
-        for (auto& channel : voice.cache)
-            channel.resize (static_cast<size_t> (maximumGrain));
-    pending.reserve (72004);
+    for (auto& lane : lanes)
+    {
+        for (auto& head : lane.heads)
+            for (auto& channel : head.cache)
+                channel.reset (new float[static_cast<size_t> (maximumGrain)]);
+        // Longest grain + positive position offset, with 1 ms capture starts.
+        lane.pending.reserve (144004);
+    }
     fadeLength = std::max (1, static_cast<int> (rate * 0.0005));
     const auto coefficient = [this] (double seconds) { return static_cast<float> (std::exp (-1.0 / (rate * seconds))); };
     fastAttack = coefficient (0.0003);
     fastRelease = coefficient (0.005);
     slowAttack = coefficient (0.020);
     slowRelease = coefficient (0.100);
+    gainSmoothing = coefficient (0.005);
     reset();
+}
+
+void GrainEngine::clearLane (Lane& lane, int index)
+{
+    for (auto& head : lane.heads)
+        head.length = head.copied = head.phase = head.modeFadeRemaining = 0;
+    lane.pending.clear();
+    lane.current = lane.fadeRemaining = 0;
+    lane.countdown = lane.nextBeat = 0.0;
+    lane.liveBegin = lane.liveUntil = lane.sourceStart = 0;
+    lane.liveMix = 0.0f;
+    lane.force = true;
+    lane.info = {};
+    lane.rng = 0x9e3779b9u ^ (static_cast<std::uint32_t> (index + 1) * 0x85ebca6bu);
 }
 
 void GrainEngine::reset()
 {
-    // Invalidate references instead of clearing large buffers on a transport edge.
-    // Every new grain is fully recorded before a history snapshot can be read.
-    for (auto& voice : voices)
-        voice.length = voice.copied = voice.phase = 0;
-    pending.clear();
+    for (int i = 0; i < maxVoices; ++i)
+    {
+        auto& lane = lanes[static_cast<size_t> (i)];
+        clearLane (lane, i);
+        lane.enabled = false;
+        lane.gainL = lane.gainR = lane.targetL = lane.targetR = 0.0f;
+    }
     clock = captureCount = 0;
-    writePosition = currentVoice = fadeRemaining = transientHoldoff = 0;
-    countdown = expectedPpq = lastGrid = 0.0;
+    writePosition = transientHoldoff = 0;
+    expectedPpq = lastGrid = 0.0;
     fastEnvelope = slowEnvelope = 0.0f;
+    normalisation = 1.0f;
     firstBlock = forceCapture = transientArmed = true;
-    hostSync = wasHostSync = false;
-    suspended = false;
-    liveUntil = 0;
-    liveMix = 0.0f;
+    hostSync = wasHostSync = suspended = false;
 }
 
 void GrainEngine::cancelPendingCaptures()
 {
-    pending.clear();
+    for (auto& lane : lanes)
+        lane.pending.clear();
     forceCapture = true;
 }
 
@@ -53,28 +73,29 @@ void GrainEngine::beginBlock (const Settings& next, double ppq, double beatsPerS
 {
     if (! transportPlaying)
     {
-        if (! suspended)
-        {
-            reset();
-            suspended = true;
-        }
+        if (! suspended) { reset(); suspended = true; }
         return;
     }
     if (suspended)
         reset();
-    if (next.capture != settings.capture)
-        pending.clear();
-    if (next.capture != settings.capture
+    const auto captureChanged = next.capture != settings.capture;
+    const auto scheduleChanged = captureChanged
         || (next.capture == Capture::milliseconds && next.intervalSamples != settings.intervalSamples)
-        || (next.capture == Capture::synced && next.intervalBeats != settings.intervalBeats))
-    {
-        countdown = 0.0;
+        || (next.capture == Capture::synced && next.intervalBeats != settings.intervalBeats)
+        || (next.randomIntervalSamples == 0.0) != (settings.randomIntervalSamples == 0.0);
+    if (captureChanged)
+        cancelPendingCaptures();
+    if (scheduleChanged)
         forceCapture = true;
-    }
     settings = next;
+    settings.voiceCount = std::clamp (settings.voiceCount, 1, maxVoices);
+    settings.spread = std::clamp (settings.spread, 0.0f, 1.0f);
     settings.grainSamples = std::clamp (settings.grainSamples, 2, maximumGrain);
     settings.intervalSamples = std::max (rate * 0.001, settings.intervalSamples);
     settings.intervalBeats = std::max (0.0001, settings.intervalBeats);
+    settings.randomSizeSamples = std::clamp (settings.randomSizeSamples, 0.0, static_cast<double> (maximumGrain));
+    settings.randomPositionSamples = std::clamp (settings.randomPositionSamples, 0.0, static_cast<double> (maximumGrain));
+    settings.randomIntervalSamples = std::clamp (settings.randomIntervalSamples, 0.0, static_cast<double> (maximumGrain));
     const auto sensitivity = std::clamp (settings.sensitivity, 0.0f, 1.0f);
     transientRatio = 5.0f - 3.8f * sensitivity;
     transientFloor = 0.030f * std::pow (0.01f, sensitivity);
@@ -83,10 +104,33 @@ void GrainEngine::beginBlock (const Settings& next, double ppq, double beatsPerS
     ppqStep = beatsPerSample;
     if (hostSync && (firstBlock || ! wasHostSync || std::abs (ppq - expectedPpq) > beatsPerSample * 2.0))
     {
-        pending.clear();
+        cancelPendingCaptures();
         lastGrid = std::floor (ppq / settings.intervalBeats + 1.0e-9);
-        forceCapture = true;
     }
+    for (int i = 0; i < maxVoices; ++i)
+    {
+        auto& lane = lanes[static_cast<size_t> (i)];
+        const bool enabled = i < settings.voiceCount;
+        if (enabled && ! lane.enabled)
+        {
+            clearLane (lane, i);
+            // No startup gain ramp: preserve the existing live first pass exactly.
+            if (firstBlock)
+                lane.gainL = lane.gainR = 1.0f;
+        }
+        if (! enabled && lane.enabled)
+            lane.pending.clear();
+        lane.enabled = enabled;
+        const auto pan = settings.voiceCount == 1 ? 0.0f
+            : settings.spread * (2.0f * static_cast<float> (i) / static_cast<float> (settings.voiceCount - 1) - 1.0f);
+        const auto angle = (pan + 1.0f) * 0.78539816339f;
+        lane.targetL = enabled ? std::cos (angle) * 1.41421356237f : 0.0f;
+        lane.targetR = enabled ? std::sin (angle) * 1.41421356237f : 0.0f;
+        if (scheduleChanged)
+            lane.countdown = 0.0;
+    }
+    if (firstBlock)
+        normalisation = 1.0f / static_cast<float> (settings.voiceCount);
     wasHostSync = hostSync;
     firstBlock = false;
 }
@@ -100,12 +144,10 @@ bool GrainEngine::detectTransient (float level)
     };
     fastEnvelope = follow (fastEnvelope, fastAttack, fastRelease);
     slowEnvelope = follow (slowEnvelope, slowAttack, slowRelease);
-    if (transientHoldoff > 0)
-        --transientHoldoff;
+    if (transientHoldoff > 0) --transientHoldoff;
     if (fastEnvelope < std::max (transientFloor * 0.7f, slowEnvelope * (1.0f + (transientRatio - 1.0f) * 0.4f)))
         transientArmed = true;
-    if (transientArmed && transientHoldoff == 0 && fastEnvelope > transientFloor
-        && fastEnvelope > slowEnvelope * transientRatio)
+    if (transientArmed && transientHoldoff == 0 && fastEnvelope > transientFloor && fastEnvelope > slowEnvelope * transientRatio)
     {
         transientArmed = false;
         transientHoldoff = static_cast<int> (rate * 0.015);
@@ -114,43 +156,64 @@ bool GrainEngine::detectTransient (float level)
     return false;
 }
 
-void GrainEngine::requestCapture()
+double GrainEngine::randomSigned (Lane& lane, double amount)
 {
-    if (pending.size() == pending.capacity())
-        return;
-    pending.push_back ({ clock + static_cast<std::uint64_t> (settings.grainSamples), writePosition, settings.grainSamples });
-    std::push_heap (pending.begin(), pending.end());
-    liveUntil = clock + static_cast<std::uint64_t> (settings.grainSamples);
+    if (amount == 0.0) return 0.0;
+    auto& seed = lane.rng;
+    seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+    return (static_cast<double> (seed) / 4294967295.0 * 2.0 - 1.0) * amount;
 }
 
-void GrainEngine::activate (const Pending& capture)
+double GrainEngine::nextInterval (Lane& lane)
 {
-    currentVoice = 1 - currentVoice;
-    auto& voice = voices[currentVoice];
-    voice.start = capture.start;
-    voice.length = capture.length;
-    voice.copied = voice.phase = 0;
-    voice.modeFadeRemaining = 0;
-    voice.repeat = settings.repeat;
-    // The forward traversal was already heard live. Reflect without replaying it.
-    if (voice.repeat == Repeat::pingPong)
-        voice.phase = voice.length % (2 * (voice.length - 1));
-    fadeRemaining = fadeLength;
+    lane.info.interval = std::max (std::max (1.0, rate * 0.001),
+                                   settings.intervalSamples + randomSigned (lane, settings.randomIntervalSamples));
+    return lane.info.interval;
+}
+
+void GrainEngine::requestCapture (Lane& lane, double transientJitter)
+{
+    if (lane.pending.size() == lane.pending.capacity()) return;
+    const auto length = std::clamp (static_cast<int> (std::llround (settings.grainSamples + randomSigned (lane, settings.randomSizeSamples))),
+                                   std::max (2, static_cast<int> (std::round (rate * 0.001))), maximumGrain);
+    auto offset = static_cast<std::int64_t> (std::llround (randomSigned (lane, settings.randomPositionSamples) + transientJitter));
+    offset = std::clamp (offset, -static_cast<std::int64_t> (maximumGrain), static_cast<std::int64_t> (maximumGrain));
+    // No reads from before this transport run, or from overwritten history.
+    const auto source = std::max (std::int64_t { 0 }, static_cast<std::int64_t> (clock) + offset);
+    lane.sourceStart = static_cast<std::uint64_t> (source);
+    lane.liveBegin = std::max (clock, lane.sourceStart);
+    lane.liveUntil = lane.liveBegin + static_cast<std::uint64_t> (length);
+    lane.pending.push_back ({ lane.liveUntil, static_cast<int> (lane.sourceStart % static_cast<std::uint64_t> (capacity)), length });
+    std::push_heap (lane.pending.begin(), lane.pending.end());
+    lane.info.length = length;
+    lane.info.positionOffset = source - static_cast<std::int64_t> (clock);
+    ++lane.info.requests;
+}
+
+void GrainEngine::activate (Lane& lane, const Pending& capture)
+{
+    lane.current = 1 - lane.current;
+    auto& head = lane.heads[static_cast<size_t> (lane.current)];
+    head.start = capture.start;
+    head.length = capture.length;
+    head.copied = head.phase = head.modeFadeRemaining = 0;
+    head.repeat = settings.repeat;
+    if (head.repeat == Repeat::pingPong)
+        head.phase = head.length % (2 * (head.length - 1));
+    lane.fadeRemaining = fadeLength;
     ++captureCount;
 }
 
-float GrainEngine::read (const Voice& voice, int channel, int index) const
+float GrainEngine::read (const Head& head, int channel, int index) const
 {
-    if (index < voice.copied)
-        return voice.cache[static_cast<size_t> (channel)][static_cast<size_t> (index)];
-    return history[static_cast<size_t> (channel)][static_cast<size_t> ((voice.start + index) % capacity)];
+    if (index < head.copied)
+        return head.cache[static_cast<size_t> (channel)][static_cast<size_t> (index)];
+    return history[static_cast<size_t> (channel)][static_cast<size_t> ((head.start + index) % capacity)];
 }
 
-std::array<float, 2> GrainEngine::render (Voice& voice)
+std::array<float, 2> GrainEngine::render (Head& voice)
 {
-    if (voice.length == 0)
-        return {};
-    // Spread snapshot copying across frames. The history protects uncopied samples.
+    if (voice.length == 0) return {};
     if (voice.copied < voice.length)
     {
         for (int channel = 0; channel < 2; ++channel)
@@ -161,10 +224,8 @@ std::array<float, 2> GrainEngine::render (Voice& voice)
     const auto atPhase = [this, &voice] (int phase, Repeat repeat)
     {
         int index = phase;
-        if (repeat == Repeat::reverse)
-            index = voice.length - 1 - index;
-        else if (repeat == Repeat::pingPong && index >= voice.length)
-            index = 2 * (voice.length - 1) - index;
+        if (repeat == Repeat::reverse) index = voice.length - 1 - index;
+        else if (repeat == Repeat::pingPong && index >= voice.length) index = 2 * (voice.length - 1) - index;
         float gain = 1.0f;
         if (repeat != Repeat::pingPong)
         {
@@ -192,73 +253,98 @@ std::array<float, 2> GrainEngine::render (Voice& voice)
     return result;
 }
 
+std::array<float, 2> GrainEngine::renderLane (Lane& lane)
+{
+    auto& head = lane.heads[static_cast<size_t> (lane.current)];
+    if (head.repeat != settings.repeat)
+    {
+        head.oldRepeat = head.repeat; head.oldPhase = head.phase;
+        head.modeFadeRemaining = fadeLength; head.repeat = settings.repeat; head.phase = 0;
+    }
+    const auto liveIndex = (lane.sourceStart + (clock >= lane.liveBegin ? clock - lane.liveBegin : 0)) % static_cast<std::uint64_t> (capacity);
+    const bool live = clock >= lane.liveBegin && clock < lane.liveUntil;
+    std::array<float, 2> source {};
+    if (live)
+        source = { history[0][static_cast<size_t> (liveIndex)], history[1][static_cast<size_t> (liveIndex)] };
+    auto result = head.length == 0 ? source : render (head);
+    if (lane.fadeRemaining > 0)
+    {
+        auto& previous = lane.heads[static_cast<size_t> (1 - lane.current)];
+        const auto old = previous.length > 0 ? render (previous) : source;
+        const auto mix = static_cast<float> (fadeLength - lane.fadeRemaining + 1) / static_cast<float> (fadeLength);
+        for (size_t channel = 0; channel < result.size(); ++channel)
+            result[channel] = old[channel] + mix * (result[channel] - old[channel]);
+        --lane.fadeRemaining;
+    }
+    const auto liveStep = 1.0f / static_cast<float> (fadeLength);
+    lane.liveMix = live ? std::min (1.0f, lane.liveMix + liveStep) : std::max (0.0f, lane.liveMix - liveStep);
+    // Continue the selected source during the short fade out; it is available now.
+    if (! live && lane.liveMix > 0.0f && clock >= lane.liveUntil)
+        source = { history[0][static_cast<size_t> (liveIndex)], history[1][static_cast<size_t> (liveIndex)] };
+    for (size_t channel = 0; channel < result.size(); ++channel)
+        result[channel] += lane.liveMix * (source[channel] - result[channel]);
+    return result;
+}
+
 std::array<float, 2> GrainEngine::process (std::array<float, 2> input)
 {
-    if (suspended)
-        return {};
+    if (suspended) return {};
     for (size_t channel = 0; channel < input.size(); ++channel)
     {
-        if (! std::isfinite (input[channel]))
-            input[channel] = 0.0f;
+        if (! std::isfinite (input[channel])) input[channel] = 0.0f;
         history[channel][static_cast<size_t> (writePosition)] = input[channel];
     }
     const auto transient = detectTransient (std::max (std::abs (input[0]), std::abs (input[1])));
-    bool trigger = forceCapture;
+    const auto grid = std::floor (ppqPosition / settings.intervalBeats + 1.0e-9);
+    const auto gridTrigger = grid != lastGrid;
+    lastGrid = grid;
+    std::array<float, 2> result {};
+    float totalL = 0.0f, totalR = 0.0f;
+    for (auto& lane : lanes)
+    {
+        lane.gainL = lane.targetL + gainSmoothing * (lane.gainL - lane.targetL);
+        lane.gainR = lane.targetR + gainSmoothing * (lane.gainR - lane.targetR);
+        totalL += lane.gainL;
+        totalR += lane.gainR;
+    }
+    // Include fading-out lanes in the divisor when automating the voice count.
+    normalisation = 1.0f / std::max (1.0f, std::max (totalL, totalR));
+    for (auto& lane : lanes)
+    {
+        if (! lane.enabled && std::abs (lane.gainL) + std::abs (lane.gainR) < 0.00001f) continue;
+        if (lane.enabled)
+        {
+            bool trigger = forceCapture || lane.force;
+            lane.force = false;
+            if (settings.capture == Capture::transient)
+                trigger = trigger || transient;
+            else if (hostSync)
+                trigger = trigger || (settings.randomIntervalSamples == 0.0 ? gridTrigger : ppqPosition + 1.0e-9 >= lane.nextBeat);
+            else
+                trigger = trigger || lane.countdown <= 0.0;
+            if (trigger)
+            {
+                const auto jitter = settings.capture == Capture::transient ? randomSigned (lane, settings.randomIntervalSamples) : 0.0;
+                requestCapture (lane, jitter);
+                const auto interval = nextInterval (lane);
+                lane.countdown = interval + std::min (0.0, lane.countdown);
+                lane.nextBeat = ppqPosition + interval * ppqStep;
+            }
+            lane.countdown -= 1.0;
+        }
+        while (! lane.pending.empty() && lane.pending.front().due <= clock)
+        {
+            const auto capture = lane.pending.front();
+            std::pop_heap (lane.pending.begin(), lane.pending.end()); lane.pending.pop_back();
+            activate (lane, capture);
+        }
+        const auto audio = renderLane (lane);
+        result[0] += audio[0] * lane.gainL * normalisation;
+        result[1] += audio[1] * lane.gainR * normalisation;
+    }
     forceCapture = false;
-    if (settings.capture == Capture::transient)
-        trigger = trigger || transient;
-    else if (hostSync)
-    {
-        const auto grid = std::floor (ppqPosition / settings.intervalBeats + 1.0e-9);
-        trigger = trigger || grid != lastGrid;
-        lastGrid = grid;
-    }
-    else
-    {
-        trigger = trigger || countdown <= 0.0;
-        if (trigger)
-            countdown = settings.intervalSamples + std::min (0.0, countdown);
-        countdown -= 1.0;
-    }
-    if (trigger)
-        requestCapture();
-    while (! pending.empty() && pending.front().due <= clock)
-    {
-        const auto capture = pending.front();
-        std::pop_heap (pending.begin(), pending.end());
-        pending.pop_back();
-        activate (capture);
-    }
-    auto& voice = voices[currentVoice];
-    if (voice.repeat != settings.repeat)
-    {
-        voice.oldRepeat = voice.repeat;
-        voice.oldPhase = voice.phase;
-        voice.modeFadeRemaining = fadeLength;
-        voice.repeat = settings.repeat;
-        voice.phase = 0;
-    }
-    auto result = voice.length == 0 ? input : render (voice);
-    if (fadeRemaining > 0)
-    {
-        auto& previousVoice = voices[1 - currentVoice];
-        const auto previous = previousVoice.length > 0 ? render (previousVoice) : input;
-        const auto mix = static_cast<float> (fadeLength - fadeRemaining + 1) / static_cast<float> (fadeLength);
-        for (size_t channel = 0; channel < result.size(); ++channel)
-            result[channel] = previous[channel] + mix * (result[channel] - previous[channel]);
-        --fadeRemaining;
-    }
-    // An exclusive live first pass preserves attack timing without doubling the
-    // signal. Keep rendering the held voices underneath so their caches advance.
-    const auto liveStep = 1.0f / static_cast<float> (fadeLength);
-    liveMix = clock < liveUntil ? std::min (1.0f, liveMix + liveStep)
-                               : std::max (0.0f, liveMix - liveStep);
-    for (size_t channel = 0; channel < result.size(); ++channel)
-        result[channel] += liveMix * (input[channel] - result[channel]);
     writePosition = (writePosition + 1) % capacity;
-    ++clock;
-    ppqPosition += ppqStep;
-    expectedPpq = ppqPosition;
+    ++clock; ppqPosition += ppqStep; expectedPpq = ppqPosition;
     return result;
 }
 }

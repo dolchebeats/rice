@@ -40,7 +40,7 @@ void playbackOrder()
         }
         const int pingPong[] { 1, 2, 3, 4, 3, 2 };
         // Run longer than the entire rolling history: held grains must stay immutable.
-        for (int i = 0; i < 150000; ++i)
+        for (int i = 0; i < 240000; ++i)
         {
             const auto expected = mode == rice::GrainEngine::Repeat::straight ? i % 4 + 1
                 : mode == rice::GrainEngine::Repeat::reverse ? 4 - i % 4 : pingPong[(i + 4) % 6];
@@ -217,6 +217,140 @@ void timingAndEdges()
         }
     }
 }
+
+void unisonAndRandomisation()
+{
+    rice::GrainEngine engine;
+    engine.prepare (1000.0);
+    rice::GrainEngine::Settings settings;
+    settings.grainSamples = 20;
+    settings.intervalSamples = 70.0;
+    settings.voiceCount = 16;
+    engine.beginBlock (settings, 0.0, 0.0, false);
+    for (int i = 0; i < 500; ++i)
+    {
+        const auto out = engine.process ({ 0.5f, -0.25f });
+        check (std::abs (out[0]) <= 0.50001f && std::abs (out[1]) <= 0.25001f, "Sixteen identical voices do not multiply the output level");
+    }
+    for (int i = 1; i < 16; ++i)
+        check (engine.getVoiceInfo (i).requests == engine.getVoiceInfo (0).requests, "Zero randomness keeps every voice on the same capture schedule");
+    for (const int voices : { 1, 16, 2, 9, 1 })
+    {
+        settings.voiceCount = voices;
+        settings.spread = 1.0f;
+        engine.beginBlock (settings, 0.0, 0.0, false);
+        for (int i = 0; i < 200; ++i)
+        {
+            const auto out = engine.process ({ 0.5f, 0.5f });
+            check (std::abs (out[0]) <= 0.50001f && std::abs (out[1]) <= 0.50001f, "Automating voice count and spread keeps the mix bounded");
+        }
+    }
+    engine.reset();
+    settings.voiceCount = 16;
+    settings.spread = 0.0f;
+    settings.randomSizeSamples = 9.0;
+    settings.randomIntervalSamples = 25.0;
+    settings.randomPositionSamples = 15.0;
+    engine.beginBlock (settings, 0.0, 0.0, false);
+    bool differentSizes = false, differentTimes = false, positive = false, negative = false;
+    double stereoDifferenceCentered = 0.0;
+    for (int i = 0; i < 3000; ++i)
+    {
+        const auto input = std::sin (static_cast<float> (i) * 0.17f);
+        const auto out = engine.process ({ input, input });
+        check (std::isfinite (out[0]) && std::abs (out[0]) <= 1.00001f && std::abs (out[1]) <= 1.00001f, "Randomised polyphonic audio is finite and bounded");
+        stereoDifferenceCentered += std::abs (out[0] - out[1]);
+        for (int voice = 0; voice < 16; ++voice)
+        {
+            const auto info = engine.getVoiceInfo (voice);
+            check (info.length >= 11 && info.length <= 29, "Random Size stays inside the signed amount");
+            check (info.interval >= 45.0 && info.interval <= 95.0, "Random Interval stays inside the signed amount");
+            check (std::abs (info.positionOffset) <= 15, "Random Position stays inside the signed amount");
+            differentSizes = differentSizes || info.length != engine.getVoiceInfo (0).length;
+            differentTimes = differentTimes || info.requests != engine.getVoiceInfo (0).requests;
+            positive = positive || info.positionOffset > 0;
+            negative = negative || info.positionOffset < 0;
+        }
+    }
+    check (differentSizes && differentTimes && positive && negative, "Voices draw independent lengths, intervals, and both position signs");
+    check (stereoDifferenceCentered < 0.001, "Zero spread centers mono material");
+    settings.spread = 1.0f;
+    engine.beginBlock (settings, 0.0, 0.0, false);
+    double stereoDifferenceSpread = 0.0;
+    for (int i = 0; i < 1000; ++i)
+    {
+        const auto input = std::sin (static_cast<float> (i) * 0.17f);
+        const auto out = engine.process ({ input, input });
+        stereoDifferenceSpread += std::abs (out[0] - out[1]);
+    }
+    check (stereoDifferenceSpread > 1.0, "Spread creates different left/right signals from independent mono voices");
+
+    engine.reset();
+    settings.capture = rice::GrainEngine::Capture::synced;
+    settings.intervalBeats = 0.14;
+    double ppq = -1.0;
+    for (int block = 0; block < 40; ++block)
+    {
+        const double step = 0.002 + block * 0.000005;
+        settings.intervalSamples = settings.intervalBeats / step;
+        settings.randomIntervalSamples = 0.05 / step;
+        engine.beginBlock (settings, ppq, step, true);
+        for (int i = 0; i < 50; ++i)
+        {
+            const auto out = engine.process ({ 0.1f, 0.1f });
+            check (std::isfinite (out[0]) && std::abs (out[0]) <= 0.10001f, "Random synced scheduling survives negative PPQ and tempo ramps");
+        }
+        ppq += step * 50.0;
+    }
+    check (engine.getVoiceInfo (0).requests < 40, "Synced random amounts do not force a capture on each tempo-ramp block");
+    settings.capture = rice::GrainEngine::Capture::transient;
+    engine.beginBlock (settings, 0.0, 0.0, false, false);
+    for (int i = 0; i < 200; ++i)
+        checkNear (engine.process ({ 1.0f, 1.0f })[0], 0.0, "Stopping transport silences every randomised voice");
+    engine.beginBlock (settings, 0.0, 0.0, false, true);
+    for (int i = 0; i < 200; ++i)
+        checkNear (engine.process ({ 0.0f, 0.0f })[0], 0.0, "Restart cannot read pre-stop history at negative random positions");
+}
+
+void positionSourceAudio()
+{
+    rice::GrainEngine engine;
+    engine.prepare (1000.0);
+    rice::GrainEngine::Settings settings;
+    settings.grainSamples = 4;
+    settings.intervalSamples = 1000000.0;
+    settings.randomPositionSamples = 12.0;
+    engine.beginBlock (settings, 0.0, 0.0, false);
+    int time = 0;
+    const auto tick = [&engine, &time]
+    {
+        const auto value = static_cast<float> (time++) * 0.001f;
+        return engine.process ({ value, -value });
+    };
+    for (; time < 100;) tick();
+    bool earlier = false, later = false;
+    for (int capture = 0; capture < 30; ++capture)
+    {
+        const auto start = time;
+        engine.cancelPendingCaptures();
+        const auto first = tick();
+        const auto offset = static_cast<int> (engine.getVoiceInfo (0).positionOffset);
+        earlier = earlier || offset < 0;
+        later = later || offset > 0;
+        const auto liveBegin = std::max (0, offset);
+        if (liveBegin == 0)
+            checkNear (first[0], static_cast<double> (start + offset) * 0.001, "Negative position reads actual earlier audio");
+        for (int sample = 1; sample <= liveBegin + 4; ++sample)
+        {
+            const auto out = tick();
+            if (sample >= liveBegin && sample < liveBegin + 4)
+                checkNear (out[0], static_cast<double> (start + offset + sample - liveBegin) * 0.001, "Position shifts the source audio, with causal waiting for positive offsets");
+            if (sample == liveBegin + 4)
+                checkNear (out[0], static_cast<double> (start + offset) * 0.001, "The completed grain loops the same shifted source");
+        }
+    }
+    check (earlier && later, "Position source test exercises both signed directions");
+}
 }
 
 int main()
@@ -226,5 +360,7 @@ int main()
     hostScheduling();
     transportAndLivePass();
     timingAndEdges();
+    unisonAndRandomisation();
+    positionSourceAudio();
     std::cout << "All grain-engine checks passed.\n";
 }

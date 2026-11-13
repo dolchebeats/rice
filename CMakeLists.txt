@@ -50,6 +50,11 @@ if(RICE_BUILD_TESTS)
     add_executable(rice_engine_tests tests/GrainEngineTests.cpp src/GrainEngine.cpp)
     target_include_directories(rice_engine_tests PRIVATE src)
     add_test(NAME rice_engine_tests COMMAND rice_engine_tests)
+    add_executable(rice_plugin_tests tests/PluginTests.cpp)
+    target_include_directories(rice_plugin_tests PRIVATE src JUCE/modules)
+    target_compile_definitions(rice_plugin_tests PRIVATE JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1)
+    target_link_libraries(rice_plugin_tests PRIVATE rice)
+    add_test(NAME rice_plugin_tests COMMAND rice_plugin_tests "${CMAKE_CURRENT_BINARY_DIR}/rice-ui.png")
 endif()
 
 # JUCE modules

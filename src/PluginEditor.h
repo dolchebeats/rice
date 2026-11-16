@@ -15,14 +15,14 @@ private:
     void updateKnobs();
     AudioPluginAudioProcessor& processor;
     juce::LookAndFeel_V4 lookAndFeel;
-    juce::Slider sizeKnob, captureKnob, voicesKnob, spreadKnob;
+    juce::Slider sizeKnob, captureKnob, voicesKnob, spreadKnob, mixKnob;
     std::array<juce::Slider, 3> randomKnobs;
     juce::ComboBox sizeMode, captureMode, repeatMode;
     std::array<juce::ComboBox, 3> randomModes;
-    juce::Label sizeLabel, captureLabel, voicesLabel, spreadLabel, repeatLabel, tempoLabel, hintLabel;
+    juce::Label sizeLabel, captureLabel, voicesLabel, spreadLabel, mixLabel, repeatLabel, tempoLabel, hintLabel;
     std::array<juce::Label, 3> randomLabels;
     juce::TooltipWindow tooltip { this, 600 };
-    std::unique_ptr<SliderAttachment> sizeAttachment, captureAttachment, voicesAttachment, spreadAttachment;
+    std::unique_ptr<SliderAttachment> sizeAttachment, captureAttachment, voicesAttachment, spreadAttachment, mixAttachment;
     std::array<std::unique_ptr<SliderAttachment>, 3> randomAttachments;
     std::unique_ptr<ComboAttachment> sizeModeAttachment, captureModeAttachment, repeatAttachment;
     std::array<std::unique_ptr<ComboAttachment>, 3> randomModeAttachments;

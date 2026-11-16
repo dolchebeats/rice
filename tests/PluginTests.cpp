@@ -29,12 +29,59 @@ public:
         return info;
     }
 };
+
+void dryWetAudio()
+{
+    AudioPluginAudioProcessor processor;
+    set (processor, "sizeMs", 4.0f);
+    set (processor, "captureMs", 1000.0f);
+    processor.prepareToPlay (1000.0, 64);
+    juce::AudioBuffer<float> audio (2, 64);
+    juce::MidiBuffer midi;
+    const auto process = [&] (float input)
+    {
+        for (int i = 0; i < 64; ++i)
+        {
+            audio.setSample (0, i, input);
+            audio.setSample (1, i, -input);
+        }
+        processor.processBlock (audio, midi);
+    };
+    process (0.2f); // Capture a constant grain.
+    process (0.8f);
+    check (std::abs (audio.getSample (0, 63) - 0.2f) < 0.00001f, "100% wet contains only the grain");
+    set (processor, "dryWet", 0.0f);
+    process (0.8f);
+    for (int i = 1; i < 64; ++i)
+        check (std::abs (audio.getSample (0, i) - audio.getSample (0, i - 1)) <= 0.031f, "Mix automation ramps instead of jumping");
+    check (audio.getSample (0, 63) == 0.8f && audio.getSample (1, 63) == -0.8f, "0% wet preserves the original stereo input exactly");
+    set (processor, "dryWet", 50.0f);
+    process (0.8f);
+    check (std::abs (audio.getSample (0, 63) - 0.5f) < 0.00001f
+        && std::abs (audio.getSample (1, 63) + 0.5f) < 0.00001f, "50% wet linearly blends both stereo channels");
+    set (processor, "dryWet", 100.0f);
+    process (0.8f);
+    check (std::abs (audio.getSample (0, 63) - 0.2f) < 0.00001f, "Grain processing continues while the output is dry");
+    set (processor, "dryWet", 0.0f);
+    auto layout = processor.getBusesLayout();
+    layout.inputBuses.set (0, juce::AudioChannelSet::mono());
+    layout.outputBuses.set (0, juce::AudioChannelSet::mono());
+    check (processor.setBusesLayout (layout), "Mono layout accepted");
+    processor.prepareToPlay (1000.0, 64);
+    juce::AudioBuffer<float> mono (1, 64);
+    for (int i = 0; i < 64; ++i) mono.setSample (0, i, 0.37f);
+    processor.processBlock (mono, midi);
+    check (mono.getSample (0, 0) == 0.37f && mono.getSample (0, 63) == 0.37f, "Dry mono input is unchanged from the first sample");
+}
 }
 
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
+    dryWetAudio();
     AudioPluginAudioProcessor original;
+    check (original.parameters.getRawParameterValue ("dryWet")->load() == 100.0f, "Mix defaults to fully wet");
+    set (original, "dryWet", 39.0f);
     check (original.parameters.getRawParameterValue ("voices")->load() == 1.0f, "Default voice count is one");
     set (original, "voices", 16.0f);
     set (original, "spread", 87.0f);
@@ -47,14 +94,14 @@ int main (int argc, char** argv)
     original.getStateInformation (state);
     AudioPluginAudioProcessor restored;
     restored.setStateInformation (state.getData(), static_cast<int> (state.getSize()));
-    for (const auto* id : { "voices", "spread", "randomSizeMs", "randomIntervalMode", "randomIntervalSync", "randomPositionMs", "captureMode" })
+    for (const auto* id : { "voices", "spread", "randomSizeMs", "randomIntervalMode", "randomIntervalSync", "randomPositionMs", "captureMode", "dryWet" })
         check (std::abs (original.parameters.getRawParameterValue (id)->load() - restored.parameters.getRawParameterValue (id)->load()) < 0.001f, "New controls survive session-state roundtrip");
     {
         auto legacyState = original.parameters.copyState();
         for (int i = legacyState.getNumChildren(); --i >= 0;)
         {
             const auto id = legacyState.getChild (i).getProperty ("id").toString();
-            if (id == "voices" || id == "spread" || id.startsWith ("random"))
+            if (id == "voices" || id == "spread" || id == "dryWet" || id.startsWith ("random"))
                 legacyState.removeChild (i, nullptr);
         }
         AudioPluginAudioProcessor legacyReader;
@@ -62,9 +109,11 @@ int main (int argc, char** argv)
         check (legacyReader.parameters.getRawParameterValue ("voices")->load() == 1.0f
             && legacyReader.parameters.getRawParameterValue ("randomSizeMs")->load() == 0.0f,
             "Older sessions keep the single-voice, no-randomness defaults");
+        check (legacyReader.parameters.getRawParameterValue ("dryWet")->load() == 100.0f, "Older sessions retain fully wet playback");
     }
     PlayHead playHead;
     restored.setPlayHead (&playHead);
+    set (restored, "dryWet", 100.0f);
     restored.prepareToPlay (1000.0, 64);
     juce::AudioBuffer<float> audio (2, 64);
     juce::MidiBuffer midi;
@@ -85,7 +134,7 @@ int main (int argc, char** argv)
     int knobs = 0;
     for (int i = 0; i < editor->getNumChildComponents(); ++i)
         if (dynamic_cast<juce::Slider*> (editor->getChildComponent (i)) != nullptr) ++knobs;
-    check (knobs == 7, "Editor contains both existing knobs and all five new knobs");
+    check (knobs == 8, "Editor includes the Dry/Wet knob");
     for (const auto* prefix : { "randomSize", "randomInterval", "randomPosition" })
     {
         const juce::String id (prefix);

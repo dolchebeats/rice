@@ -28,7 +28,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
         knob.setColour (juce::Slider::textBoxBackgroundColourId, panel);
         addAndMakeVisible (knob);
     };
-    for (auto* knob : { &sizeKnob, &captureKnob, &voicesKnob, &spreadKnob })
+    for (auto* knob : { &sizeKnob, &captureKnob, &voicesKnob, &spreadKnob, &mixKnob })
         addKnob (*knob);
     for (auto& knob : randomKnobs)
         addKnob (knob);
@@ -36,6 +36,8 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     captureKnob.setName ("Capture interval or transient sensitivity");
     voicesKnob.setName ("Voices");
     spreadKnob.setName ("Spread");
+    mixKnob.setName ("Dry/Wet");
+    mixKnob.setTooltip ("Blend the original input with the grain voices. 0% is dry; 100% is wet.");
     sizeKnob.setTooltip ("Length of each recorded grain. Hear the first pass live, then repeat it in the selected direction.");
     captureKnob.setTooltip ("Time between capture starts. In Transient mode, higher sensitivity detects quieter attacks.");
     voicesKnob.setTooltip ("1 to 16 independent grain voices. The output is normalised as voices are added.");
@@ -59,6 +61,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     addLabel (captureLabel, "CAPTURE INTERVAL");
     addLabel (voicesLabel, "VOICES");
     addLabel (spreadLabel, "SPREAD");
+    addLabel (mixLabel, "DRY / WET");
     addLabel (repeatLabel, "REPEAT");
     addLabel (tempoLabel, "");
     addLabel (hintLabel, "Random amounts = +/- per voice and capture     |     T = triplet     D = dotted     1 = whole note");
@@ -84,6 +87,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     repeatAttachment = std::make_unique<ComboAttachment> (processor.parameters, "repeat", repeatMode);
     voicesAttachment = std::make_unique<SliderAttachment> (processor.parameters, "voices", voicesKnob);
     spreadAttachment = std::make_unique<SliderAttachment> (processor.parameters, "spread", spreadKnob);
+    mixAttachment = std::make_unique<SliderAttachment> (processor.parameters, "dryWet", mixKnob);
     sizeMode.onChange = [this] { updateKnobs(); };
     captureMode.onChange = [this] { updateKnobs(); };
     updateKnobs();
@@ -154,8 +158,8 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     g.setColour (panel);
     for (int i = 0; i < 4; ++i)
         g.fillRoundedRectangle (26.0f + 214.0f * static_cast<float> (i), 94.0f, 206.0f, 244.0f, 14.0f);
-    for (int i = 0; i < 3; ++i)
-        g.fillRoundedRectangle (26.0f + 286.0f * static_cast<float> (i), 354.0f, 276.0f, 244.0f, 14.0f);
+    for (int i = 0; i < 4; ++i)
+        g.fillRoundedRectangle (26.0f + 214.0f * static_cast<float> (i), 354.0f, 206.0f, 244.0f, 14.0f);
     g.setColour (accent.withAlpha (0.2f + captureFlash * 0.8f));
     g.fillEllipse (858.0f, 40.0f, 9.0f, 9.0f);
 }
@@ -174,11 +178,13 @@ void AudioPluginAudioProcessorEditor::resized()
     captureMode.setBounds (258, 296, 170, 28);
     for (size_t i = 0; i < randomKnobs.size(); ++i)
     {
-        const int x = 26 + static_cast<int> (i) * 286;
-        randomLabels[i].setBounds (x + 8, 366, 260, 26);
-        randomKnobs[i].setBounds (x + 48, 398, 180, 146);
-        randomModes[i].setBounds (x + 38, 556, 200, 28);
+        const int x = 26 + static_cast<int> (i) * 214;
+        randomLabels[i].setBounds (x + 8, 366, 190, 26);
+        randomKnobs[i].setBounds (x + 13, 398, 180, 146);
+        randomModes[i].setBounds (x + 18, 556, 170, 28);
     }
+    mixLabel.setBounds (676, 366, 190, 26);
+    mixKnob.setBounds (681, 398, 180, 146);
     repeatLabel.setBounds (26, 616, 100, 30);
     repeatMode.setBounds (134, 616, 218, 30);
     tempoLabel.setBounds (618, 26, 224, 38);

@@ -45,6 +45,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudioPluginAudioProcessor::c
         layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { id + "Ms", 1 }, juce::String (name) + " (ms)", amountRange, 0.0f, msAttributes));
         layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { id + "Sync", 1 }, juce::String (name) + " (sync)", randomDivisions, 0));
     }
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "dryWet", 1 }, "Dry/Wet", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float value, int) { return juce::String (value, 1) + " %"; })
+            .withValueFromStringFunction ([] (const juce::String& text) { return text.getFloatValue(); })));
     return layout;
 }
 
@@ -53,9 +56,9 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
                                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       parameters (*this, nullptr, "RiceParameters", createParameters())
 {
-    const std::array<const char*, 19> ids { "sizeMode", "sizeMs", "sizeSync", "captureMode", "captureMs", "captureSync", "sensitivity", "repeat",
+    const std::array<const char*, 20> ids { "sizeMode", "sizeMs", "sizeSync", "captureMode", "captureMs", "captureSync", "sensitivity", "repeat",
         "voices", "spread", "randomSizeMode", "randomSizeMs", "randomSizeSync", "randomIntervalMode", "randomIntervalMs", "randomIntervalSync",
-        "randomPositionMode", "randomPositionMs", "randomPositionSync" };
+        "randomPositionMode", "randomPositionMs", "randomPositionSync", "dryWet" };
     for (size_t i = 0; i < ids.size(); ++i)
         values[i] = parameters.getRawParameterValue (ids[i]);
 }
@@ -64,12 +67,15 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int)
 {
     rate = sampleRate;
     engine.prepare (rate);
+    wetMix.reset (rate, 0.02);
+    wetMix.setCurrentAndTargetValue (values[19]->load (std::memory_order_relaxed) * 0.01f);
     previousSizeMode = previousSizeValue = -1.0f;
 }
 
 void AudioPluginAudioProcessor::reset()
 {
     engine.reset();
+    wetMix.setCurrentAndTargetValue (values[19]->load (std::memory_order_relaxed) * 0.01f);
     displayCaptureCount.store (0, std::memory_order_relaxed);
 }
 
@@ -139,14 +145,25 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     settings.randomIntervalSamples = randomSamples (13);
     settings.randomPositionSamples = randomSamples (16);
     engine.beginBlock (settings, ppq, bpm / (60.0 * rate), followHost, transportPlaying);
+    wetMix.setTargetValue (juce::jlimit (0.0f, 1.0f, load (19) * 0.01f));
     auto* left = buffer.getWritePointer (0);
     auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
     for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
     {
-        const auto result = engine.process ({ left[sample], right != nullptr ? right[sample] : left[sample] });
-        left[sample] = right != nullptr ? result[0] : 0.5f * (result[0] + result[1]);
+        const auto dryLeft = std::isfinite (left[sample]) ? left[sample] : 0.0f;
+        const auto inputRight = right != nullptr ? right[sample] : dryLeft;
+        const auto dryRight = std::isfinite (inputRight) ? inputRight : 0.0f;
+        const auto result = engine.process ({ dryLeft, dryRight });
+        const auto amount = wetMix.getNextValue();
+        const auto blend = [amount] (float dry, float wet)
+        {
+            if (amount == 0.0f) return dry;
+            if (amount == 1.0f) return wet;
+            return dry * (1.0f - amount) + wet * amount;
+        };
+        left[sample] = blend (dryLeft, right != nullptr ? result[0] : 0.5f * (result[0] + result[1]));
         if (right != nullptr)
-            right[sample] = result[1];
+            right[sample] = blend (dryRight, result[1]);
     }
     displayCaptureCount.store (engine.getCaptureCount(), std::memory_order_relaxed);
 }

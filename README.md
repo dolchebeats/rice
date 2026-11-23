@@ -1,6 +1,6 @@
 # rice
 
-A JUCE VST3 / standalone granular capture-and-repeat effect. This first version is inspired by the rhythmic looping idea of [Ableton's Beats warp mode](https://www.ableton.com/en/live-manual/12/audio-clips-tempo-and-warping/), with its own live-input capture engine.
+A JUCE VST3 / standalone granular capture-and-repeat effect with its own live-input capture engine.
 
 ## Controls
 

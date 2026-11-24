@@ -3,9 +3,11 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include "GrainMath.h"
 
 namespace rice
 {
+struct VisualState;
 class GrainEngine
 {
 public:
@@ -22,6 +24,11 @@ public:
         int voiceCount = 1;
         float spread = 0.0f;
         double randomSizeSamples = 0.0, randomIntervalSamples = 0.0, randomPositionSamples = 0.0;
+        Envelope envelope;
+        bool envelopeEnabled = false, freeze = false, modulating = false;
+        double positionSamples = 0.0;
+        float pitch = 0.0f, detune = 0.0f, randomPitch = 0.0f;
+        int root = 0, scale = 0;
     };
     struct VoiceInfo
     {
@@ -37,7 +44,10 @@ public:
     std::array<float, 2> process (std::array<float, 2> input);
     std::uint64_t getCaptureCount() const noexcept { return captureCount; }
     int getActiveLength() const noexcept { return lanes[0].heads[lanes[0].current].length; }
+    double getPlaybackRate (int index = 0) const { const auto& lane = lanes[static_cast<size_t> (index)]; return lane.heads[static_cast<size_t> (lane.current)].speed; }
     VoiceInfo getVoiceInfo (int index) const noexcept { return lanes[static_cast<size_t> (index)].info; }
+    void publishMarkers (VisualState&, std::uint64_t recorded, double availableSamples, bool append) const;
+    void setVisualClock (std::uint64_t timestamp) { visualOffset = static_cast<double> (timestamp) - static_cast<double> (clock); }
 
 private:
     struct Head
@@ -45,15 +55,24 @@ private:
         // Uninitialised storage: only recorded samples are touched/read. Long sync
         // settings reserve address space without eagerly filling every voice cache.
         std::array<std::unique_ptr<float[]>, 2> cache;
-        int start = 0, length = 0, copied = 0, phase = 0;
+        int start = 0, length = 0, copied = 0;
+        double phase = 0.0, speed = 1.0, oldPhase = 0.0;
+        int envelopeAge = 0;
+        Envelope envelope;
+        bool envelopeEnabled = false;
+        CompiledEnvelope contour;
+        std::uint64_t sourceTime = 0;
+        int frozenOwner = -1, aliasFade = 0;
+        float randomPitchDraw = 0.0f;
         Repeat repeat = Repeat::straight;
-        int oldPhase = 0, modeFadeRemaining = 0;
+        int modeFadeRemaining = 0;
         Repeat oldRepeat = Repeat::straight;
     };
     struct Pending
     {
         std::uint64_t due;
         int start, length;
+        std::uint64_t sourceTime = 0;
         bool operator< (const Pending& other) const noexcept { return due > other.due; }
     };
     struct Lane
@@ -63,6 +82,7 @@ private:
         int current = 0, fadeRemaining = 0;
         double countdown = 0.0, nextBeat = 0.0;
         std::uint64_t liveBegin = 0, liveUntil = 0, sourceStart = 0;
+        std::uint64_t displayStart = 0;
         std::uint32_t rng = 1;
         float liveMix = 0.0f, gainL = 0.0f, gainR = 0.0f, targetL = 0.0f, targetR = 0.0f;
         bool force = true, enabled = false;
@@ -80,6 +100,7 @@ private:
     std::array<std::vector<float>, 2> history;
     std::array<Lane, maxVoices> lanes;
     Settings settings;
+    double visualOffset = 0.0;
     double rate = 44100.0, ppqPosition = 0.0, ppqStep = 0.0, expectedPpq = 0.0, lastGrid = 0.0;
     float fastEnvelope = 0.0f, slowEnvelope = 0.0f;
     float fastAttack = 0.0f, fastRelease = 0.0f, slowAttack = 0.0f, slowRelease = 0.0f;

@@ -1,192 +1,118 @@
 #include "PluginEditor.h"
-
-namespace
-{
-const juce::Colour background { 0xff171b19 }, panel { 0xff222925 }, ink { 0xffeee9db }, accent { 0xffc3df89 };
-const std::array<juce::String, 3> randomPrefixes { "randomSize", "randomInterval", "randomPosition" };
-}
-
+namespace { const juce::Colour ink (0xffeee9db), accent (0xffc3df89), background (0xff171b19); }
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor& p)
-    : AudioProcessorEditor (&p), processor (p)
+    : AudioProcessorEditor (&p), processor (p), waveform (p), envelope (p)
 {
-    lookAndFeel.setColour (juce::Slider::rotarySliderFillColourId, accent);
-    lookAndFeel.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff38433b));
-    lookAndFeel.setColour (juce::Slider::thumbColourId, ink);
-    lookAndFeel.setColour (juce::Slider::textBoxTextColourId, ink);
-    lookAndFeel.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    lookAndFeel.setColour (juce::ComboBox::backgroundColourId, background);
-    lookAndFeel.setColour (juce::ComboBox::textColourId, ink);
-    lookAndFeel.setColour (juce::ComboBox::outlineColourId, juce::Colour (0xff475349));
-    lookAndFeel.setColour (juce::PopupMenu::backgroundColourId, background);
-    lookAndFeel.setColour (juce::PopupMenu::textColourId, ink);
-    lookAndFeel.setColour (juce::PopupMenu::highlightedBackgroundColourId, juce::Colour (0xff475349));
-    setLookAndFeel (&lookAndFeel);
-    const auto addKnob = [this] (juce::Slider& knob)
+    look.setColour (juce::Slider::rotarySliderFillColourId, accent);
+    look.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff3c473e));
+    look.setColour (juce::Slider::thumbColourId, ink); look.setColour (juce::Slider::textBoxTextColourId, ink);
+    look.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    look.setColour (juce::ComboBox::backgroundColourId, background); look.setColour (juce::ComboBox::textColourId, ink);
+    look.setColour (juce::ComboBox::outlineColourId, juce::Colour (0xff475349));
+    look.setColour (juce::PopupMenu::backgroundColourId, background); look.setColour (juce::PopupMenu::textColourId, ink);
+    look.setColour (juce::PopupMenu::highlightedBackgroundColourId, juce::Colour (0xff475349));
+    look.setColour (juce::ToggleButton::textColourId, ink); look.setColour (juce::ToggleButton::tickColourId, accent);
+    setLookAndFeel (&look);
+    addAndMakeVisible (waveform); addAndMakeVisible (tabs); addAndMakeVisible (status);
+    const std::array<const char*, 5> names { "Grains & Buffer", "Pitch & Feedback", "Envelope", "Motion", "Mod Matrix" };
+    for (size_t i = 0; i < panels.size(); ++i) tabs.addTab (names[i], background, &panels[i], false);
+    addControl (0, "sizeMs", "GRAIN SIZE", 0, 0, "sizeMode", { "sizeMs", "sizeSync" });
+    addControl (0, "captureMs", "CAPTURE / SENSITIVITY", 1, 0, "captureMode", { "captureMs", "captureSync", "sensitivity" });
+    addControl (0, "voices", "VOICES", 2, 0); addControl (0, "spread", "SPREAD", 3, 0);
+    addControl (0, "randomSizeMs", "RANDOM SIZE", 0, 1, "randomSizeMode", { "randomSizeMs", "randomSizeSync" });
+    addControl (0, "randomIntervalMs", "RANDOM INTERVAL", 1, 1, "randomIntervalMode", { "randomIntervalMs", "randomIntervalSync" });
+    addControl (0, "randomPositionMs", "RANDOM POSITION", 2, 1, "randomPositionMode", { "randomPositionMs", "randomPositionSync" });
+    addControl (0, "dryWet", "DRY / WET", 3, 1);
+    addControl (0, "texture", "BEAT / TEXTURE", 0, 2); addControl (0, "density", "DENSITY (TEXTURE)", 1, 2);
+    addControl (0, "position", "BUFFER POSITION", 2, 2); addControl (0, "scan", "SCAN SPEED", 3, 2);
+    addControl (0, "bufferLength", "BUFFER LENGTH", 0, 3); addControl (0, "freeze", "FREEZE BUFFER", 1, 3, {}, {}, false, true);
+    addControl (0, "repeat", "REPEAT DIRECTION", 2, 3, {}, {}, true);
+    addControl (1, "pitch", "PITCH", 0, 0); addControl (1, "detune", "VOICE DETUNE", 1, 0); addControl (1, "randomPitch", "RANDOM PITCH", 2, 0);
+    addControl (1, "scale", "PITCH SCALE", 3, 0, {}, {}, true); addControl (1, "root", "SCALE ROOT", 0, 1, {}, {}, true);
+    addControl (1, "feedback", "FEEDBACK", 1, 1); addControl (1, "feedbackHP", "FEEDBACK HIGH-PASS", 2, 1); addControl (1, "feedbackLP", "FEEDBACK LOW-PASS", 3, 1);
+    addControl (1, "feedbackDrive", "FEEDBACK SATURATION", 1, 2);
+    panels[2].addAndMakeVisible (envelope);
+    addControl (2, "beatEnvelope", "SHAPE BEAT GRAINS", 3, 3, {}, {}, false, true);
+    const std::array<const char*, 8> envelopeIds { "envAttack", "envHold", "envDecay", "envSustain", "envRelease", "envAttackCurve", "envDecayCurve", "envReleaseCurve" };
+    const std::array<const char*, 8> envelopeNames { "ATTACK", "HOLD", "DECAY", "SUSTAIN", "RELEASE", "ATTACK CURVE", "DECAY CURVE", "RELEASE CURVE" };
+    for (size_t i = 0; i < 8; ++i) addControl (2, envelopeIds[i], envelopeNames[i], static_cast<int> (i % 4), 2 + static_cast<int> (i / 4));
+    // Place the Beat envelope toggle in the graph header rather than over a curve control.
+    controls[controls.size() - 9]->setBounds (860, 235, 270, 55);
+    addControl (3, "lfo1Rate", "LFO 1 RATE", 0, 0, "lfo1Mode", { "lfo1Rate", "lfo1Sync" });
+    addControl (3, "lfo1Shape", "LFO 1 SHAPE", 1, 0, {}, {}, true);
+    addControl (3, "lfo2Rate", "LFO 2 RATE", 2, 0, "lfo2Mode", { "lfo2Rate", "lfo2Sync" });
+    addControl (3, "lfo2Shape", "LFO 2 SHAPE", 3, 0, {}, {}, true);
+    addControl (3, "followerAttack", "FOLLOWER ATTACK", 0, 1); addControl (3, "followerRelease", "FOLLOWER RELEASE", 1, 1);
+    addControl (3, "followerGain", "FOLLOWER GAIN", 2, 1); addControl (3, "randomRate", "SMOOTH RANDOM RATE", 3, 1);
+    addControl (3, "sequenceLength", "SEQUENCE LENGTH", 0, 2); addControl (3, "sequenceSync", "SEQUENCE STEP DIVISION", 1, 2);
+    for (size_t i = 0; i < steps.size(); ++i)
     {
-        knob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        knob.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 158, 28);
-        knob.setColour (juce::Slider::textBoxBackgroundColourId, panel);
-        addAndMakeVisible (knob);
-    };
-    for (auto* knob : { &sizeKnob, &captureKnob, &voicesKnob, &spreadKnob, &mixKnob })
-        addKnob (*knob);
-    for (auto& knob : randomKnobs)
-        addKnob (knob);
-    sizeKnob.setName ("Grain size");
-    captureKnob.setName ("Capture interval or transient sensitivity");
-    voicesKnob.setName ("Voices");
-    spreadKnob.setName ("Spread");
-    mixKnob.setName ("Dry/Wet");
-    mixKnob.setTooltip ("Blend the original input with the grain voices. 0% is dry; 100% is wet.");
-    sizeKnob.setTooltip ("Length of each recorded grain. Hear the first pass live, then repeat it in the selected direction.");
-    captureKnob.setTooltip ("Time between capture starts. In Transient mode, higher sensitivity detects quieter attacks.");
-    voicesKnob.setTooltip ("1 to 16 independent grain voices. The output is normalised as voices are added.");
-    spreadKnob.setTooltip ("Space the voices evenly across the stereo field. One voice stays centered.");
-    sizeMode.addItemList ({ "Milliseconds", "Tempo sync" }, 1);
-    captureMode.addItemList ({ "Milliseconds", "Tempo sync", "Transient" }, 1);
-    repeatMode.addItemList ({ "Straight", "Reverse", "Back-and-forth" }, 1);
-    sizeMode.setName ("Grain size units");
-    captureMode.setName ("Capture trigger mode");
-    repeatMode.setName ("Grain playback direction");
-    for (auto* combo : { &sizeMode, &captureMode, &repeatMode })
-        addAndMakeVisible (*combo);
-    const auto addLabel = [this] (juce::Label& label, const juce::String& text)
-    {
-        label.setColour (juce::Label::textColourId, ink);
-        label.setJustificationType (juce::Justification::centred);
-        label.setText (text, juce::dontSendNotification);
-        addAndMakeVisible (label);
-    };
-    addLabel (sizeLabel, "GRAIN SIZE");
-    addLabel (captureLabel, "CAPTURE INTERVAL");
-    addLabel (voicesLabel, "VOICES");
-    addLabel (spreadLabel, "SPREAD");
-    addLabel (mixLabel, "DRY / WET");
-    addLabel (repeatLabel, "REPEAT");
-    addLabel (tempoLabel, "");
-    addLabel (hintLabel, "Random amounts = +/- per voice and capture     |     T = triplet     D = dotted     1 = whole note");
-    hintLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9ca89c));
-    const std::array<juce::String, 3> labels { "RANDOM SIZE", "RANDOM INTERVAL", "RANDOM POSITION" };
-    const std::array<juce::String, 3> tips {
-        "Pick a new grain length within +/- this amount for each voice at each capture. Zero / Off disables it.",
-        "Pick a new capture interval within +/- this amount per voice. In Transient mode, jitter the capture around each attack.",
-        "Pick a grain source start within +/- this amount per voice. Earlier audio comes from history; later audio must arrive first." };
-    for (size_t i = 0; i < randomKnobs.size(); ++i)
-    {
-        addLabel (randomLabels[i], labels[i]);
-        randomKnobs[i].setName (labels[i]);
-        randomKnobs[i].setTooltip (tips[i]);
-        randomModes[i].addItemList ({ "Milliseconds", "Tempo sync" }, 1);
-        randomModes[i].setName (labels[i] + " units");
-        addAndMakeVisible (randomModes[i]);
-        randomModeAttachments[i] = std::make_unique<ComboAttachment> (processor.parameters, randomPrefixes[i] + "Mode", randomModes[i]);
-        randomModes[i].onChange = [this] { updateKnobs(); };
+        auto& slider = steps[i]; slider.setSliderStyle (juce::Slider::LinearVertical); slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 58, 24);
+        slider.setName ("Sequence step " + juce::String (static_cast<int> (i + 1))); slider.setComponentID ("step" + juce::String (static_cast<int> (i)));
+        panels[3].addAndMakeVisible (slider); stepAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (processor.parameters, slider.getComponentID(), slider);
+        stepLabels[i].setText (juce::String (static_cast<int> (i + 1)), juce::dontSendNotification); stepLabels[i].setJustificationType (juce::Justification::centred);
+        stepLabels[i].setColour (juce::Label::textColourId, ink); panels[3].addAndMakeVisible (stepLabels[i]);
     }
-    sizeModeAttachment = std::make_unique<ComboAttachment> (processor.parameters, "sizeMode", sizeMode);
-    captureModeAttachment = std::make_unique<ComboAttachment> (processor.parameters, "captureMode", captureMode);
-    repeatAttachment = std::make_unique<ComboAttachment> (processor.parameters, "repeat", repeatMode);
-    voicesAttachment = std::make_unique<SliderAttachment> (processor.parameters, "voices", voicesKnob);
-    spreadAttachment = std::make_unique<SliderAttachment> (processor.parameters, "spread", spreadKnob);
-    mixAttachment = std::make_unique<SliderAttachment> (processor.parameters, "dryWet", mixKnob);
-    sizeMode.onChange = [this] { updateKnobs(); };
-    captureMode.onChange = [this] { updateKnobs(); };
-    updateKnobs();
-    setSize (900, 684);
-    startTimerHz (30);
-    timerCallback();
-}
-
-AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
-{
-    stopTimer();
-    setLookAndFeel (nullptr);
-}
-
-void AudioPluginAudioProcessorEditor::updateKnobs()
-{
-    // Attachments update the dropdown before APVTS raw-value listeners finish.
-    // Read the displayed selection so onChange can rebind without a timer delay.
-    const auto size = sizeMode.getSelectedItemIndex();
-    const auto capture = captureMode.getSelectedItemIndex();
-    if (size != lastSizeMode)
+    for (size_t i = 0; i < 8; ++i)
     {
-        sizeAttachment.reset();
-        sizeAttachment = std::make_unique<SliderAttachment> (processor.parameters, size == 0 ? "sizeMs" : "sizeSync", sizeKnob);
-        lastSizeMode = size;
+        const auto prefix = "mod" + juce::String (static_cast<int> (i));
+        for (auto* combo : { &routeSources[i], &routeTargets[i] }) panels[4].addAndMakeVisible (*combo);
+        routeSources[i].addItemList (dynamic_cast<juce::AudioParameterChoice*> (processor.parameters.getParameter (prefix + "Source"))->choices, 1);
+        routeTargets[i].addItemList (dynamic_cast<juce::AudioParameterChoice*> (processor.parameters.getParameter (prefix + "Target"))->choices, 1);
+        routeSources[i].setName ("Route " + juce::String (static_cast<int> (i + 1)) + " source"); routeTargets[i].setName ("Route " + juce::String (static_cast<int> (i + 1)) + " target");
+        sourceAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.parameters, prefix + "Source", routeSources[i]);
+        targetAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.parameters, prefix + "Target", routeTargets[i]);
+        routeDepths[i].setSliderStyle (juce::Slider::LinearHorizontal); routeDepths[i].setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 26);
+        routeDepths[i].setName ("Route " + juce::String (static_cast<int> (i + 1)) + " depth"); routeDepths[i].setComponentID (prefix + "Amount");
+        panels[4].addAndMakeVisible (routeDepths[i]); depthAttachments[i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (processor.parameters, prefix + "Amount", routeDepths[i]);
     }
-    if (capture != lastCaptureMode)
+    const std::array<juce::String, 5> hints {
+        "Beat keeps live first passes. Texture launches overlapping grains from captured audio. Density is launches per second per voice.",
+        "Wet output -> high-pass -> low-pass -> saturation -> recording buffer. Freeze holds the buffer and stops feedback recording.",
+        "Envelope times fit the grain lifetime; any remaining time is sustain. Texture always uses this envelope; Beat shaping is optional.",
+        "Assign sources in Mod Matrix. Free LFOs use Hz; synced LFOs and the sequencer follow DAW beats. Smooth random glides between values.",
+        "Choose a source and target, then set signed depth. Each route adds modulation without changing the saved knob value." };
+    for (size_t i = 0; i < notes.size(); ++i)
     {
-        captureAttachment.reset();
-        captureAttachment = std::make_unique<SliderAttachment> (processor.parameters,
-            capture == 0 ? "captureMs" : capture == 1 ? "captureSync" : "sensitivity", captureKnob);
-        captureLabel.setText (capture == 2 ? "SENSITIVITY" : "CAPTURE INTERVAL", juce::dontSendNotification);
-        lastCaptureMode = capture;
+        notes[i].setText (hints[i], juce::dontSendNotification); notes[i].setColour (juce::Label::textColourId, juce::Colour (0xff9ca89c));
+        notes[i].setFont (juce::FontOptions (13.0f)); notes[i].setJustificationType (juce::Justification::centredLeft); panels[i].addAndMakeVisible (notes[i]);
     }
-    for (size_t i = 0; i < randomKnobs.size(); ++i)
-    {
-        const auto mode = randomModes[i].getSelectedItemIndex();
-        if (mode != lastRandomModes[i])
-        {
-            randomAttachments[i].reset();
-            randomAttachments[i] = std::make_unique<SliderAttachment> (processor.parameters,
-                randomPrefixes[i] + (mode == 0 ? "Ms" : "Sync"), randomKnobs[i]);
-            lastRandomModes[i] = mode;
-        }
-    }
+    status.setColour (juce::Label::textColourId, juce::Colour (0xff9ca89c)); status.setJustificationType (juce::Justification::centredLeft);
+    setSize (1180, 960); startTimerHz (30); timerCallback();
 }
-
-void AudioPluginAudioProcessorEditor::timerCallback()
+AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor() { stopTimer(); tabs.clearTabs(); setLookAndFeel (nullptr); }
+void AudioPluginAudioProcessorEditor::addControl (int page, const juce::String& id, const juce::String& name, int col, int row,
+                                                 const juce::String& mode, const juce::StringArray& variants, bool choice, bool toggle)
 {
-    updateKnobs();
-    const auto bpm = processor.displayBpm.load (std::memory_order_relaxed);
-    tempoLabel.setText (juce::String (bpm, 1) + (processor.usingHostTempo.load() ? " BPM / HOST" : " BPM / FALLBACK"), juce::dontSendNotification);
-    const auto count = processor.displayCaptureCount.load (std::memory_order_relaxed);
-    captureFlash = count != lastCaptureCount ? 1.0f : captureFlash * 0.78f;
-    lastCaptureCount = count;
-    repaint();
+    auto control = std::make_unique<ParameterControl> (processor, id, name, mode, variants, choice, toggle);
+    control->setBounds (12 + col * 284, 10 + row * 160, 278, 156); panels[static_cast<size_t> (page)].addAndMakeVisible (*control); controls.push_back (std::move (control));
 }
-
-void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
-{
-    g.fillAll (background);
-    g.setColour (ink);
-    g.setFont (juce::FontOptions (44.0f, juce::Font::bold));
-    g.drawText ("rice", 30, 16, 150, 58, juce::Justification::centredLeft);
-    g.setFont (juce::FontOptions (13.0f));
-    g.setColour (juce::Colour (0xff9ca89c));
-    g.drawText ("CAPTURE / REPEAT / SCATTER", 150, 34, 300, 24, juce::Justification::centredLeft);
-    g.setColour (panel);
-    for (int i = 0; i < 4; ++i)
-        g.fillRoundedRectangle (26.0f + 214.0f * static_cast<float> (i), 94.0f, 206.0f, 244.0f, 14.0f);
-    for (int i = 0; i < 4; ++i)
-        g.fillRoundedRectangle (26.0f + 214.0f * static_cast<float> (i), 354.0f, 206.0f, 244.0f, 14.0f);
-    g.setColour (accent.withAlpha (0.2f + captureFlash * 0.8f));
-    g.fillEllipse (858.0f, 40.0f, 9.0f, 9.0f);
-}
-
 void AudioPluginAudioProcessorEditor::resized()
 {
-    const std::array<juce::Label*, 4> labels { &sizeLabel, &captureLabel, &voicesLabel, &spreadLabel };
-    const std::array<juce::Slider*, 4> knobs { &sizeKnob, &captureKnob, &voicesKnob, &spreadKnob };
-    for (size_t i = 0; i < knobs.size(); ++i)
+    waveform.setBounds (8, 60, getWidth() - 16, 160); tabs.setBounds (8, 225, getWidth() - 16, 700); status.setBounds (24, 930, getWidth() - 48, 24);
+    envelope.setBounds (12, 6, 1130, 230);
+    for (size_t i = 0; i < 5; ++i) notes[i].setBounds (20, i == 4 ? 18 : i == 2 ? 246 : 648, 1110, i == 4 ? 42 : 20);
+    // Keep envelope's graph instruction clear of its Beat-shaping toggle.
+    notes[2].setBounds (20, 244, 820, 50);
+    notes[3].setBounds (20, 648, 1110, 20);
+    for (size_t i = 0; i < 16; ++i) { const int x = 20 + static_cast<int> (i) * 70; stepLabels[i].setBounds (x, 492, 64, 22); steps[i].setBounds (x, 515, 64, 126); }
+    for (size_t i = 0; i < 8; ++i)
     {
-        const int x = 26 + static_cast<int> (i) * 214;
-        labels[i]->setBounds (x + 8, 106, 190, 26);
-        knobs[i]->setBounds (x + 13, 138, 180, 146);
+        const int y = 70 + static_cast<int> (i) * 66;
+        routeSources[i].setBounds (24, y, 210, 32); routeTargets[i].setBounds (254, y, 405, 32); routeDepths[i].setBounds (682, y, 430, 32);
     }
-    sizeMode.setBounds (44, 296, 170, 28);
-    captureMode.setBounds (258, 296, 170, 28);
-    for (size_t i = 0; i < randomKnobs.size(); ++i)
-    {
-        const int x = 26 + static_cast<int> (i) * 214;
-        randomLabels[i].setBounds (x + 8, 366, 190, 26);
-        randomKnobs[i].setBounds (x + 13, 398, 180, 146);
-        randomModes[i].setBounds (x + 18, 556, 170, 28);
-    }
-    mixLabel.setBounds (676, 366, 190, 26);
-    mixKnob.setBounds (681, 398, 180, 146);
-    repeatLabel.setBounds (26, 616, 100, 30);
-    repeatMode.setBounds (134, 616, 218, 30);
-    tempoLabel.setBounds (618, 26, 224, 38);
-    hintLabel.setBounds (26, 650, 848, 24);
+}
+void AudioPluginAudioProcessorEditor::timerCallback()
+{
+    status.setText (juce::String (processor.displayBpm.load(), 1) + (processor.usingHostTempo.load() ? " BPM / HOST" : " BPM / FALLBACK")
+        + "     |     LFO 1 " + juce::String (processor.displayMods[0].load(), 2) + "    LFO 2 " + juce::String (processor.displayMods[1].load(), 2)
+        + "    Follower " + juce::String (processor.displayMods[2].load(), 2) + "    Seq " + juce::String (processor.displayMods[3].load(), 2)
+        + "    Random " + juce::String (processor.displayMods[4].load(), 2), juce::dontSendNotification);
+    waveform.repaint(); envelope.repaint();
+}
+void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (background); g.setColour (ink); g.setFont (juce::FontOptions (38.0f, juce::Font::bold)); g.drawText ("rice", 26, 8, 130, 48, juce::Justification::centredLeft);
+    g.setColour (accent); g.setFont (juce::FontOptions (13.0f)); g.drawText ("CAPTURE / SHAPE / SCATTER", 155, 19, 450, 26, juce::Justification::centredLeft);
+    g.setColour (juce::Colour (0xff9ca89c)); g.drawText ("Grain dots: position + envelope level     |     Vertical marks: captures", 620, 19, 530, 26, juce::Justification::centredRight);
 }

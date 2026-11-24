@@ -1,6 +1,5 @@
 #pragma once
-#include "PluginProcessor.h"
-
+#include "VisualComponents.h"
 class AudioPluginAudioProcessorEditor final : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -8,27 +7,28 @@ public:
     ~AudioPluginAudioProcessorEditor() override;
     void paint (juce::Graphics&) override;
     void resized() override;
+    juce::TabbedComponent& getTabs() { return tabs; }
+    EnvelopeEditor& getEnvelopeEditor() { return envelope; }
 private:
-    using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
-    using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     void timerCallback() override;
-    void updateKnobs();
+    void addControl (int panel, const juce::String& id, const juce::String& name, int col, int row,
+                     const juce::String& mode = {}, const juce::StringArray& variants = {}, bool choice = false, bool toggle = false);
     AudioPluginAudioProcessor& processor;
-    juce::LookAndFeel_V4 lookAndFeel;
-    juce::Slider sizeKnob, captureKnob, voicesKnob, spreadKnob, mixKnob;
-    std::array<juce::Slider, 3> randomKnobs;
-    juce::ComboBox sizeMode, captureMode, repeatMode;
-    std::array<juce::ComboBox, 3> randomModes;
-    juce::Label sizeLabel, captureLabel, voicesLabel, spreadLabel, mixLabel, repeatLabel, tempoLabel, hintLabel;
-    std::array<juce::Label, 3> randomLabels;
+    juce::LookAndFeel_V4 look;
+    BufferDisplay waveform;
+    EnvelopeEditor envelope;
+    juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
+    std::array<juce::Component, 5> panels;
+    std::vector<std::unique_ptr<ParameterControl>> controls;
+    std::array<juce::ComboBox, 8> routeSources, routeTargets;
+    std::array<juce::Slider, 8> routeDepths;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>, 8> sourceAttachments, targetAttachments;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>, 8> depthAttachments;
+    std::array<juce::Slider, 16> steps;
+    std::array<juce::Label, 16> stepLabels;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>, 16> stepAttachments;
+    std::array<juce::Label, 5> notes;
+    juce::Label status;
     juce::TooltipWindow tooltip { this, 600 };
-    std::unique_ptr<SliderAttachment> sizeAttachment, captureAttachment, voicesAttachment, spreadAttachment, mixAttachment;
-    std::array<std::unique_ptr<SliderAttachment>, 3> randomAttachments;
-    std::unique_ptr<ComboAttachment> sizeModeAttachment, captureModeAttachment, repeatAttachment;
-    std::array<std::unique_ptr<ComboAttachment>, 3> randomModeAttachments;
-    std::array<int, 3> lastRandomModes { -1, -1, -1 };
-    int lastSizeMode = -1, lastCaptureMode = -1;
-    std::uint64_t lastCaptureCount = 0;
-    float captureFlash = 0.0f;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
 };

@@ -1,4 +1,5 @@
 #include "GrainEngine.h"
+#include "CloudEngine.h"
 #include <algorithm>
 #include <cmath>
 
@@ -33,11 +34,16 @@ void GrainEngine::prepare (double sampleRate)
 void GrainEngine::clearLane (Lane& lane, int index)
 {
     for (auto& head : lane.heads)
-        head.length = head.copied = head.phase = head.modeFadeRemaining = 0;
+    {
+        head.length = head.copied = head.modeFadeRemaining = 0;
+        head.phase = 0.0;
+        head.frozenOwner = -1; head.aliasFade = 0;
+    }
     lane.pending.clear();
     lane.current = lane.fadeRemaining = 0;
     lane.countdown = lane.nextBeat = 0.0;
     lane.liveBegin = lane.liveUntil = lane.sourceStart = 0;
+    lane.displayStart = 0;
     lane.liveMix = 0.0f;
     lane.force = true;
     lane.info = {};
@@ -73,20 +79,45 @@ void GrainEngine::beginBlock (const Settings& next, double ppq, double beatsPerS
 {
     if (! transportPlaying)
     {
-        if (! suspended) { reset(); suspended = true; }
+        if (! suspended)
+        {
+            if (settings.freeze)
+            { for (auto& lane : lanes) { lane.pending.clear(); lane.liveMix = 0.0f; lane.liveUntil = clock; } }
+            else reset();
+            suspended = true;
+        }
         return;
     }
     if (suspended)
-        reset();
+    { if (settings.freeze && next.freeze) suspended = false; else reset(); }
     const auto captureChanged = next.capture != settings.capture;
+    const auto pitchChanged = next.pitch != settings.pitch || next.detune != settings.detune || next.randomPitch != settings.randomPitch
+        || next.root != settings.root || next.scale != settings.scale || next.voiceCount != settings.voiceCount;
     const auto scheduleChanged = captureChanged
-        || (next.capture == Capture::milliseconds && next.intervalSamples != settings.intervalSamples)
+        || (! next.modulating && next.capture == Capture::milliseconds && next.intervalSamples != settings.intervalSamples)
         || (next.capture == Capture::synced && next.intervalBeats != settings.intervalBeats)
         || (next.randomIntervalSamples == 0.0) != (settings.randomIntervalSamples == 0.0);
     if (captureChanged)
         cancelPendingCaptures();
     if (scheduleChanged)
         forceCapture = true;
+    if (next.freeze && ! settings.freeze)
+    {
+        for (auto& lane : lanes)
+        {
+            if (lane.heads[static_cast<size_t> (lane.current)].length == 0 && clock > lane.sourceStart)
+            {
+                const auto length = static_cast<int> (std::min (clock - lane.sourceStart, static_cast<std::uint64_t> (std::max (2, lane.info.length))));
+                if (length >= 2) activate (lane, { clock, static_cast<int> (lane.sourceStart % static_cast<std::uint64_t> (capacity)), length, lane.displayStart });
+            }
+            lane.pending.clear(); lane.liveUntil = clock; lane.liveMix = 0.0f;
+        }
+    }
+    if (! next.freeze && settings.freeze)
+    {
+        forceCapture = true;
+        for (auto& lane : lanes) for (auto& head : lane.heads) if (head.frozenOwner >= 0) head.aliasFade = fadeLength;
+    }
     settings = next;
     settings.voiceCount = std::clamp (settings.voiceCount, 1, maxVoices);
     settings.spread = std::clamp (settings.spread, 0.0f, 1.0f);
@@ -114,6 +145,21 @@ void GrainEngine::beginBlock (const Settings& next, double ppq, double beatsPerS
         if (enabled && ! lane.enabled)
         {
             clearLane (lane, i);
+            if (i > 0 && settings.freeze)
+            {
+                const auto owner = lanes[0].current;
+                const auto& reference = lanes[0].heads[static_cast<size_t> (owner)];
+                if (reference.length > 0)
+                {
+                    auto& head = lane.heads[0]; head.frozenOwner = owner; head.length = reference.length;
+                    head.start = reference.start; head.sourceTime = reference.sourceTime; head.repeat = settings.repeat;
+                    head.envelope = settings.envelope; head.envelopeEnabled = settings.envelopeEnabled; head.contour.set (head.envelope, head.length * 1000.0 / rate);
+                    const auto detune = settings.voiceCount == 1 ? 0.0f : settings.detune * (2.0f * static_cast<float> (i) / static_cast<float> (settings.voiceCount - 1) - 1.0f);
+                    head.randomPitchDraw = static_cast<float> (randomSigned (lane, 1.0));
+                    head.speed = pitchRatio (settings.pitch, detune, settings.randomPitch, head.randomPitchDraw, settings.root, settings.scale);
+                    lane.info.length = head.length; lane.displayStart = head.sourceTime;
+                }
+            }
             // No startup gain ramp: preserve the existing live first pass exactly.
             if (firstBlock)
                 lane.gainL = lane.gainR = 1.0f;
@@ -121,6 +167,12 @@ void GrainEngine::beginBlock (const Settings& next, double ppq, double beatsPerS
         if (! enabled && lane.enabled)
             lane.pending.clear();
         lane.enabled = enabled;
+        if (enabled && pitchChanged)
+        {
+            const auto cents = settings.voiceCount == 1 ? 0.0f : settings.detune * (2.0f * static_cast<float> (i) / static_cast<float> (settings.voiceCount - 1) - 1.0f);
+            for (auto& head : lane.heads) if (head.length > 0)
+                head.speed = pitchRatio (settings.pitch, cents, settings.randomPitch, head.randomPitchDraw, settings.root, settings.scale);
+        }
         const auto pan = settings.voiceCount == 1 ? 0.0f
             : settings.spread * (2.0f * static_cast<float> (i) / static_cast<float> (settings.voiceCount - 1) - 1.0f);
         const auto angle = (pan + 1.0f) * 0.78539816339f;
@@ -176,14 +228,15 @@ void GrainEngine::requestCapture (Lane& lane, double transientJitter)
     if (lane.pending.size() == lane.pending.capacity()) return;
     const auto length = std::clamp (static_cast<int> (std::llround (settings.grainSamples + randomSigned (lane, settings.randomSizeSamples))),
                                    std::max (2, static_cast<int> (std::round (rate * 0.001))), maximumGrain);
-    auto offset = static_cast<std::int64_t> (std::llround (randomSigned (lane, settings.randomPositionSamples) + transientJitter));
+    auto offset = static_cast<std::int64_t> (std::llround (randomSigned (lane, settings.randomPositionSamples) + transientJitter - settings.positionSamples));
     offset = std::clamp (offset, -static_cast<std::int64_t> (maximumGrain), static_cast<std::int64_t> (maximumGrain));
     // No reads from before this transport run, or from overwritten history.
     const auto source = std::max (std::int64_t { 0 }, static_cast<std::int64_t> (clock) + offset);
     lane.sourceStart = static_cast<std::uint64_t> (source);
+    lane.displayStart = static_cast<std::uint64_t> (std::max (0.0, static_cast<double> (source) + visualOffset));
     lane.liveBegin = std::max (clock, lane.sourceStart);
     lane.liveUntil = lane.liveBegin + static_cast<std::uint64_t> (length);
-    lane.pending.push_back ({ lane.liveUntil, static_cast<int> (lane.sourceStart % static_cast<std::uint64_t> (capacity)), length });
+    lane.pending.push_back ({ lane.liveUntil, static_cast<int> (lane.sourceStart % static_cast<std::uint64_t> (capacity)), length, lane.displayStart });
     std::push_heap (lane.pending.begin(), lane.pending.end());
     lane.info.length = length;
     lane.info.positionOffset = source - static_cast<std::int64_t> (clock);
@@ -195,8 +248,17 @@ void GrainEngine::activate (Lane& lane, const Pending& capture)
     lane.current = 1 - lane.current;
     auto& head = lane.heads[static_cast<size_t> (lane.current)];
     head.start = capture.start;
+    head.frozenOwner = -1; head.aliasFade = 0;
+    head.sourceTime = capture.sourceTime;
     head.length = capture.length;
-    head.copied = head.phase = head.modeFadeRemaining = 0;
+    head.copied = head.modeFadeRemaining = head.envelopeAge = 0;
+    head.phase = 0.0;
+    const auto index = static_cast<int> (&lane - lanes.data());
+    const auto detune = settings.voiceCount == 1 ? 0.0f : settings.detune * (2.0f * static_cast<float> (index) / static_cast<float> (settings.voiceCount - 1) - 1.0f);
+    head.randomPitchDraw = static_cast<float> (randomSigned (lane, settings.randomPitch == 0.0f ? 0.0 : 1.0));
+    head.speed = pitchRatio (settings.pitch, detune, settings.randomPitch, head.randomPitchDraw, settings.root, settings.scale);
+    head.envelope = settings.envelope; head.envelopeEnabled = settings.envelopeEnabled;
+    head.contour.set (head.envelope, head.length * 1000.0 / rate);
     head.repeat = settings.repeat;
     if (head.repeat == Repeat::pingPong)
         head.phase = head.length % (2 * (head.length - 1));
@@ -206,6 +268,7 @@ void GrainEngine::activate (Lane& lane, const Pending& capture)
 
 float GrainEngine::read (const Head& head, int channel, int index) const
 {
+    if (head.frozenOwner >= 0) return read (lanes[0].heads[static_cast<size_t> (head.frozenOwner)], channel, index);
     if (index < head.copied)
         return head.cache[static_cast<size_t> (channel)][static_cast<size_t> (index)];
     return history[static_cast<size_t> (channel)][static_cast<size_t> ((head.start + index) % capacity)];
@@ -214,16 +277,21 @@ float GrainEngine::read (const Head& head, int channel, int index) const
 std::array<float, 2> GrainEngine::render (Head& voice)
 {
     if (voice.length == 0) return {};
-    if (voice.copied < voice.length)
+    if (voice.envelopeAge == 0)
+    {
+        voice.envelope = settings.envelope; voice.envelopeEnabled = settings.envelopeEnabled;
+        voice.contour.set (voice.envelope, voice.length * 1000.0 / rate);
+    }
+    if (voice.frozenOwner < 0 && voice.copied < voice.length)
     {
         for (int channel = 0; channel < 2; ++channel)
             voice.cache[static_cast<size_t> (channel)][static_cast<size_t> (voice.copied)]
                 = history[static_cast<size_t> (channel)][static_cast<size_t> ((voice.start + voice.copied) % capacity)];
         ++voice.copied;
     }
-    const auto atPhase = [this, &voice] (int phase, Repeat repeat)
+    const auto atPhase = [this, &voice] (double phase, Repeat repeat)
     {
-        int index = phase;
+        double index = phase;
         if (repeat == Repeat::reverse) index = voice.length - 1 - index;
         else if (repeat == Repeat::pingPong && index >= voice.length) index = 2 * (voice.length - 1) - index;
         float gain = 1.0f;
@@ -231,13 +299,23 @@ std::array<float, 2> GrainEngine::render (Head& voice)
         {
             const auto edge = std::min (fadeLength, (voice.length - 1) / 4);
             if (edge > 0)
-                gain = std::min (1.0f, static_cast<float> (std::min (index, voice.length - 1 - index)) / static_cast<float> (edge));
+                gain = std::clamp (static_cast<float> (std::min (index, voice.length - 1 - index)) / static_cast<float> (edge), 0.0f, 1.0f);
         }
-        return std::array<float, 2> { read (voice, 0, index) * gain, read (voice, 1, index) * gain };
+        index = std::clamp (index, 0.0, static_cast<double> (voice.length - 1));
+        const auto first = static_cast<int> (index);
+        const auto second = std::min (first + 1, voice.length - 1);
+        const auto mix = static_cast<float> (index - first);
+        std::array<float, 2> result;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const auto a = read (voice, ch, first);
+            result[static_cast<size_t> (ch)] = (a + mix * (read (voice, ch, second) - a)) * gain;
+        }
+        return result;
     };
-    const auto advance = [&voice] (int phase, Repeat repeat)
+    const auto advance = [&voice] (double phase, Repeat repeat)
     {
-        return (phase + 1) % (repeat == Repeat::pingPong ? 2 * (voice.length - 1) : voice.length);
+        return wrap (phase + voice.speed, repeat == Repeat::pingPong ? 2 * (voice.length - 1) : voice.length);
     };
     auto result = atPhase (voice.phase, voice.repeat);
     voice.phase = advance (voice.phase, voice.repeat);
@@ -249,6 +327,17 @@ std::array<float, 2> GrainEngine::render (Head& voice)
             result[channel] = previous[channel] + mix * (result[channel] - previous[channel]);
         voice.oldPhase = advance (voice.oldPhase, voice.oldRepeat);
         --voice.modeFadeRemaining;
+    }
+    if (voice.envelopeEnabled)
+    {
+        const auto gain = voice.contour.value (static_cast<double> (voice.envelopeAge) / voice.length);
+        for (auto& sample : result) sample *= gain;
+    }
+    voice.envelopeAge = (voice.envelopeAge + 1) % voice.length;
+    if (voice.aliasFade > 0)
+    {
+        for (auto& sample : result) sample *= static_cast<float> (voice.aliasFade) / static_cast<float> (fadeLength);
+        if (--voice.aliasFade == 0) { voice.length = 0; voice.frozenOwner = -1; }
     }
     return result;
 }
@@ -265,7 +354,15 @@ std::array<float, 2> GrainEngine::renderLane (Lane& lane)
     const bool live = clock >= lane.liveBegin && clock < lane.liveUntil;
     std::array<float, 2> source {};
     if (live)
+    {
         source = { history[0][static_cast<size_t> (liveIndex)], history[1][static_cast<size_t> (liveIndex)] };
+        if (settings.envelopeEnabled)
+        {
+            const auto length = std::max (std::uint64_t { 1 }, lane.liveUntil - lane.liveBegin);
+            const auto gain = settings.envelope.value (static_cast<double> (clock - lane.liveBegin) / static_cast<double> (length), static_cast<double> (length) * 1000.0 / rate);
+            for (auto& sample : source) sample *= gain;
+        }
+    }
     auto result = head.length == 0 ? source : render (head);
     if (lane.fadeRemaining > 0)
     {
@@ -322,7 +419,7 @@ std::array<float, 2> GrainEngine::process (std::array<float, 2> input)
                 trigger = trigger || (settings.randomIntervalSamples == 0.0 ? gridTrigger : ppqPosition + 1.0e-9 >= lane.nextBeat);
             else
                 trigger = trigger || lane.countdown <= 0.0;
-            if (trigger)
+            if (trigger && ! settings.freeze)
             {
                 const auto jitter = settings.capture == Capture::transient ? randomSigned (lane, settings.randomIntervalSamples) : 0.0;
                 requestCapture (lane, jitter);
@@ -346,5 +443,29 @@ std::array<float, 2> GrainEngine::process (std::array<float, 2> input)
     writePosition = (writePosition + 1) % capacity;
     ++clock; ppqPosition += ppqStep; expectedPpq = ppqPosition;
     return result;
+}
+void GrainEngine::publishMarkers (VisualState& visual, std::uint64_t recorded, double available, bool append) const
+{
+    size_t dot = append ? static_cast<size_t> (std::max (0, visual.active.load())) : 0;
+    if (! append) for (auto& gain : visual.gains) gain.store (0.0f, std::memory_order_relaxed);
+    if (suspended) { if (! append) visual.active.store (0); return; }
+    const auto oldestTime = static_cast<double> (recorded) - available;
+    for (size_t i = 0; i < lanes.size() && dot < VisualState::dots; ++i)
+    {
+        const auto& lane = lanes[i]; if (! lane.enabled) continue;
+        const auto& head = lane.heads[static_cast<size_t> (lane.current)];
+        const auto live = clock >= lane.liveBegin && clock < lane.liveUntil;
+        if (! live && head.length == 0) continue;
+        auto phase = head.phase;
+        if (head.repeat == Repeat::reverse) phase = head.length - 1 - phase;
+        else if (head.repeat == Repeat::pingPong && phase >= head.length) phase = 2.0 * (head.length - 1) - phase;
+        const auto t = live ? static_cast<double> (lane.displayStart + clock - lane.liveBegin) : static_cast<double> (head.sourceTime) + phase;
+        const auto liveGain = live && settings.envelopeEnabled ? settings.envelope.value (static_cast<double> (clock - lane.liveBegin) / static_cast<double> (std::max (std::uint64_t { 1 }, lane.liveUntil - lane.liveBegin)), static_cast<double> (lane.liveUntil - lane.liveBegin) * 1000.0 / rate) : 1.0f;
+        const auto gain = live ? liveGain : ! head.envelopeEnabled ? 1.0f : head.contour.value (static_cast<double> (head.envelopeAge) / head.length);
+        visual.positions[dot].store (static_cast<float> (std::clamp ((t - oldestTime) / std::max (1.0, available), 0.0, 1.0)), std::memory_order_relaxed);
+        visual.gains[dot].store (gain, std::memory_order_relaxed); visual.layers[dot].store (static_cast<float> (i), std::memory_order_relaxed); ++dot;
+        visual.captures[i].store (static_cast<float> (std::clamp ((static_cast<double> (lane.displayStart) - oldestTime) / std::max (1.0, available), 0.0, 1.0)), std::memory_order_relaxed);
+    }
+    visual.active.store (static_cast<int> (dot), std::memory_order_relaxed);
 }
 }

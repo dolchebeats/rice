@@ -355,6 +355,32 @@ void positionSourceAudio()
 
 int main()
 {
+    {
+        rice::GrainEngine frozen; frozen.prepare (1000);
+        rice::GrainEngine::Settings s; s.grainSamples = 4; s.intervalSamples = 1000;
+        frozen.beginBlock (s, 0, 0, false);
+        for (int i = 0; i < 20; ++i) frozen.process ({ 0.5f, 0.5f });
+        s.freeze = true; frozen.beginBlock (s, 0, 0, false);
+        s.pitch = 12; frozen.beginBlock (s, 0, 0, false);
+        checkNear (frozen.getPlaybackRate(), 2.0, "Pitch edits affect an already frozen Beat grain");
+        s.pitch = 0; frozen.beginBlock (s, 0, 0, false);
+        s.envelopeEnabled = true; s.envelope = { 0, 0, 0, 0, 0.5f, 0, 0, 0 }; frozen.beginBlock (s, 0, 0, false);
+        for (int i = 0; i < 8; ++i) frozen.process ({ 0, 0 });
+        checkNear (frozen.process ({ 0, 0 })[0], 0.25, "Envelope edits shape frozen Beat at the next grain cycle");
+        s.envelopeEnabled = false; frozen.beginBlock (s, 0, 0, false);
+        for (int i = 0; i < 8; ++i) frozen.process ({ 0, 0 });
+        s.voiceCount = 8; s.spread = 1;
+        frozen.beginBlock (s, 0, 0, false);
+        for (int i = 0; i < 100; ++i)
+        {
+            const auto out = frozen.process ({ 0, 0 });
+            checkNear (out[0], 0.5, "Adding voices while frozen shares the captured slice safely");
+        }
+        frozen.beginBlock (s, 0, 0, false, false); checkNear (frozen.process ({ 0, 0 })[0], 0, "Frozen Beat silences on stop");
+        frozen.beginBlock (s, 0, 0, false, true); checkNear (frozen.process ({ 0, 0 })[0], 0.5, "Frozen Beat restarts from retained material");
+        s.freeze = false; frozen.beginBlock (s, 0, 0, false);
+        for (int i = 0; i < 20; ++i) check (std::isfinite (frozen.process ({ 0.1f, 0.1f })[0]), "Unfreezing safely retires borrowed voice caches");
+    }
     playbackOrder();
     overlappingCaptures();
     hostScheduling();

@@ -34,6 +34,13 @@ juce_add_plugin(rice
 
 # Source files
 target_sources(rice PRIVATE
+    src/CloudEngine.cpp
+    src/CloudEngine.h
+    src/AdvancedParameters.h
+    src/GrainMath.h
+    src/Modulation.h
+    src/VisualComponents.cpp
+    src/VisualComponents.h
     src/GrainEngine.cpp
     src/GrainEngine.h
     src/GrainTiming.h
@@ -50,6 +57,9 @@ if(RICE_BUILD_TESTS)
     add_executable(rice_engine_tests tests/GrainEngineTests.cpp src/GrainEngine.cpp)
     target_include_directories(rice_engine_tests PRIVATE src)
     add_test(NAME rice_engine_tests COMMAND rice_engine_tests)
+    add_executable(rice_advanced_tests tests/AdvancedTests.cpp src/CloudEngine.cpp)
+    target_include_directories(rice_advanced_tests PRIVATE src)
+    add_test(NAME rice_advanced_tests COMMAND rice_advanced_tests)
     add_executable(rice_plugin_tests tests/PluginTests.cpp)
     target_include_directories(rice_plugin_tests PRIVATE src JUCE/modules)
     target_compile_definitions(rice_plugin_tests PRIVATE JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1)

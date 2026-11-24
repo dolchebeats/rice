@@ -1,61 +1,95 @@
 # rice
 
+<<<<<<< Updated upstream
 A JUCE VST3 / standalone granular capture-and-repeat effect with its own live-input capture engine.
+=======
+JUCE VST3 / standalone granular effect with rhythmic Beat playback, overlapping Texture playback, and a continuous blend between them. Defaults preserve the original single-voice Beat sound. All parameters, envelope curves, step values and modulation routes support host automation and session save/restore. Audio buffers are temporary and are not embedded in presets.
+>>>>>>> Stashed changes
 
-## Controls
+## Getting started
 
-- **Grain size:** 1-1,000 ms, or a tempo-synced note length.
-- **Capture interval:** time between the starts of new recordings, independently set to 1-1,000 ms or a synced note length. Shorter intervals refresh more often. Recording windows can overlap when the interval is shorter than the grain.
-- **Transient capture:** select Transient in the capture dropdown; the second knob becomes sensitivity. Higher percentages detect quieter attacks. A stereo-linked fast/slow envelope detector includes a noise floor, re-arming, and a 15 ms holdoff to avoid triggering repeatedly on one attack.
-- **Repeat:** Straight loops forward; Reverse loops backward; Back-and-forth alternates direction across the entire grain without jumping between its ends.
-- **Voices:** 1-16 independent capture/repeat voices, default 1. The mix is normalised, including voices fading out during automation, so unison does not multiply the peak level.
-- **Spread:** 0-100% stereo distribution, with voices spaced evenly left to right using equal-power stereo balance. A single voice stays centered. Stereo source channels are preserved; mono hosts receive a fold-down of both sides.
-- **Dry/Wet:** 0% passes the original input; 100% plays only the grain voices (default). The mix is linear, with a 20 ms smoothing ramp for knob/automation changes. The grain engine keeps running at 0%, so turning it back up does not restart it. Stopping the DAW clears the grain voices; the dry path can still pass monitored input when the mix is below 100%.
-- **Random Size:** draw a fresh uniform signed size offset per voice and capture, within +/- the selected amount.
-- **Random Interval:** draw a fresh uniform signed interval offset per voice for each timed capture. In Transient mode, it instead jitters the capture source around each detected attack independently per voice (negative jitter uses earlier buffered audio; positive jitter waits).
-- **Random Position:** draw a fresh uniform signed source-position offset per voice and capture. Negative offsets read earlier input history; positive offsets wait for later input to arrive. At startup, earlier positions clamp to the beginning of the current transport run.
+Use **Grains & Buffer** for the sound source and timing, **Pitch & Feedback** for harmonies and regeneration, **Envelope** to shape grains, **Motion** for modulation sources, and **Mod Matrix** to connect sources to controls. The waveform stays visible above every tab. Vertical marks indicate capture positions; colored dots indicate grain positions and their envelope levels, grouped by voice.
 
-Each random knob has its own Milliseconds / Tempo sync dropdown. Millisecond amounts range from 0 to 1,000 ms; synced amounts include Off plus the same divisions, triplets and dotted values as grain size. They specify the maximum signed variation, not a new base value. All randomness defaults to 0 / Off, and switching units remembers both amounts. Amount edits apply on subsequent captures; a new random draw is made for each voice each time, using separate deterministic pseudo-random streams (transport restart repeats the streams).
+- Beat / Texture at **0%** retains the live first-pass slice repeater.
+- At **100%**, Texture reads recorded source windows and launches independent, overlapping, enveloped grains.
+- Intermediate settings linearly crossfade both engines. The mode blend and Dry/Wet controls have 20 ms ramps.
+- Density is **grain launches per second per voice**, independent of the capture interval. More voices add independent layers; Density adds overlaps within each layer.
 
-Randomised grain lengths clamp to 1 ms-72 seconds, and timed intervals clamp to at least 1 ms. Total position displacement, including transient timing jitter, clamps to +/-72 seconds. These limits protect the preallocated buffers; large amounts can hit them. A +/-20 ms size amount on a 100 ms grain produces lengths from 80 to 120 ms. Identical voices with all randomness off remain identical, so spreading them alone does not decorrelate mono audio.
+## Grains, capture and buffer
 
-Both sync knobs contain `1/32`, `1/16`, `1/8`, `1/6`, `1/4`, `1/2`, `1`, `2`, `3`, and `4`, each with triplet (`T`, two-thirds length) and dotted (`D`, one-and-a-half length) variants. Values are sorted by duration; some labels intentionally have the same duration. `1` means one whole note (four quarter-note beats), regardless of time signature.
+**Grain Size** is 1-1,000 ms or a DAW division. Both size and capture interval support `1/32`, `1/16`, `1/8`, `1/6`, `1/4`, `1/2`, `1`, `2`, `3`, `4` and every triplet (`T`) and dotted (`D`) variation. `1` is a whole note / four quarter-note beats regardless of time signature. Triplets are two-thirds the straight value; dotted values are one-and-a-half times it. Synced durations use host tempo, with a visible 120 BPM fallback. Supported tempo is 20-999 BPM; duration is bounded at 72 seconds.
 
-## Capture behavior
+**Capture / Sensitivity** selects when new source material is chosen: milliseconds, host beat grid, or input transients. In Transient mode the knob becomes sensitivity; higher values detect quieter attacks. Detection is stereo-linked with a fast/slow envelope comparison, a noise floor and 15 ms holdoff. Texture can keep launching grains between captures without passing the dry signal through.
 
-A trigger begins recording fresh incoming audio and plays that first pass live, independently per voice. It replaces that voice's old loop during this pass, rather than adding dry audio to it. Random Position shifts the source of this pass as well as its recorded repeats: past positions are available immediately; future positions wait while the existing grain continues (or silence before the first grain). After the selected grain duration has elapsed, the recording repeats in the selected direction. One initial capture per voice starts automatically, including in Transient mode.
+**Beat first pass:** every capture records fresh input and immediately plays the first pass live. It then repeats Straight, Reverse, or Back-and-forth. Reverse therefore has a forward live first pass before looping backward. Back-and-forth reflects after its initial forward pass. When the capture interval is shorter than the grain, live passes overlap and Beat can sound mostly dry; use Texture for a continuous cloud instead. Pitch shifting applies to Beat's recorded repeats, not to the initial live pass.
 
-For example, with a 100 ms size and 250 ms interval, recordings start and are heard live at 0, 250, 500 ms. Repeats begin at 100, 350, 600 ms. Straight wraps to the beginning; Back-and-forth turns back from the end immediately after its live forward pass. Reverse also has a live forward first pass, then loops the complete recording backward. Reversing audio that has not yet arrived is impossible without lookahead, so this live bridge is the intentional low-latency compromise. There is no grain-length delay on the first pass and no reported plugin latency. Fixed de-click crossfades take up to 0.5 ms.
+**Texture capture:** chooses a source window in already-recorded audio. It waits for the first source window to fill, then launches grains using that window independently of subsequent capture starts. Source windows are bounded by the selected buffer and available recorded history. Grain playback wraps or reflects within its source window when the pitched playback rate traverses it; the grain's envelope lifetime is unchanged by pitch.
 
-If captures occur more often than the grain length, their live passes overlap and input stays audible until one complete grain can finish without another trigger. This can make very short capture intervals sound largely dry.
+**Buffer Position** selects how far back to read: 0% is recent audio; 100% is the older end of the chosen history. **Buffer Length** is 1-72 seconds. **Scan Speed** moves the source selection in cycles per second, with signed direction; it also works while frozen. In Beat mode, Position and Scan offset subsequent captures into history. In Texture, Scan affects the source of subsequent grain launches.
 
-Tempo follows the DAW, with a visible 120 BPM fallback when the host supplies no tempo (including standalone use). Synced capture starts follow the host PPQ grid while playing; the first capture starts immediately, then subsequent starts follow the grid. Stopping the DAW silences all capture modes and discards held and unfinished grains. Playback resumes from fresh audio when the DAW starts again. Without host transport information (including standalone use), capture free-runs. Supported tempo is 20-999 BPM; the longest setting is 4 dotted whole notes at 20 BPM (72 seconds).
+**Freeze Buffer** stops updating the visible recording buffer. Texture continues launching grains from this fixed material; Beat holds its captured slice. Freeze also stops feedback from being recorded. Stopping the DAW silences all grain playback. Frozen material is retained in the running instance for a fresh grain restart; unfrozen stop/restart clears the source history. Reloading a session does not restore recorded audio: unfreeze and feed input before freezing again. Without host transport information, including standalone use, the engine free-runs.
 
-Size edits discard unfinished captures and begin a recording at the new size. Capture-mode changes and host timeline jumps in synced mode also discard unfinished recordings and start a new live pass. Direction changes affect the existing grain immediately. Short fixed fades smooth loop boundaries, replacements, and direction changes; Back-and-forth reflects at the endpoints. These are de-click fades, not user-adjustable grain envelopes.
+**Voices** is 1-16 (default 1). **Spread** distributes voices evenly left to right using equal-power stereo balance, with a single voice centered. The mix is normalised to avoid multiplying peak level as voices or overlaps are added. Mono hosts receive both sides folded down. Voice-count changes fade retiring Texture grains over 5 ms.
 
-Mono and stereo layouts are supported. Stereo audio retains its channels, with linked timing and detection. All controls support host automation and are saved with the session; recorded audio is temporary. In Transient mode the last grain can repeat indefinitely while the transport plays without further triggers, and the VST3 reports an infinite tail accordingly. The host must deliver a transport-stopped processing block for the plugin to clear playback.
+**Random Size**, **Random Interval**, and **Random Position** each have independent milliseconds / sync units. Amounts default to zero / Off; ms amounts range from 0 to 1,000 ms; sync includes Off plus every supported division. They draw fresh uniform signed offsets independently per voice. Size and interval draws happen on capture; pitch draws happen on grain launch in Texture and on completed captures in Beat. Streams are deterministic on transport restart. Unit changes remember both amounts.
 
-Memory is allocated in `prepareToPlay`, with one shared stereo input history for all voices (about 79 MiB at 48 kHz). Per-voice snapshot arrays are allocated without initialising unused samples; only active grain data is written. Supporting 16 voices at the maximum 72-second grain length reserves approximately 959 MiB of buffers and event storage at 48 kHz, doubling at 96 kHz for audio storage. Short grains touch much less snapshot memory. The audio callback allocates no grain buffers and copies snapshots incrementally to keep capture work bounded.
+Random intervals clamp to at least 1 ms. In Transient mode Random Interval jitters the selected audio around each attack. Beat allows positive source offsets to wait for future audio and negative ones to read earlier history. Texture selects existing material and clamps out-of-history offsets to the available window. Randomised duration and total displacement are bounded to the allocated 72-second range. Size edits discard unfinished Beat captures and start a new live pass.
 
-## Build on Windows
+**Dry/Wet** is a linear blend: 0% passes input exactly, 100% is the grain output (default). Grain engines continue running at 0%. Stopping transport clears grain playback, while the dry path can still pass monitored input below 100% wet.
 
-Requires a local JUCE checkout in `JUCE/` (ignored by Git), CMake 3.22+, and Visual Studio 2022 with the C++ desktop workload and a Windows SDK.
+## AHDSR envelope editor
+
+The five controls are **Attack**, **Hold**, **Decay**, **Sustain**, and **Release**. Times are milliseconds; Sustain is a percentage. The envelope fits each grain's lifetime: if A + H + D + R exceeds that lifetime, stage times are scaled proportionally; otherwise the remaining time is sustain.
+
+- Drag **A** horizontally for attack time.
+- Drag **H** horizontally for hold time. A zero-length hold uses an offset handle so it remains selectable.
+- Drag **D** horizontally for decay time and vertically for sustain level.
+- Drag **S** horizontally to move the release start and vertically for sustain level.
+- Drag **R** horizontally to change release duration. The graph's right edge remains the grain endpoint.
+- Drag a segment's diamond vertically for continuously variable attack, decay or release curvature. Zero is linear; either sign bends in opposite directions. Double-click a diamond to restore linear.
+
+Numeric stage and curve controls provide the same edits, and the graph follows host automation. **Shape Beat Grains** is off by default for compatibility; enable it to envelope Beat's live passes and repeated grains. Texture always uses AHDSR, with a short fixed edge fade as additional de-click protection. Envelope settings are captured for each new Texture grain and each Beat envelope cycle, including while frozen, so edits and modulation apply at grain boundaries rather than rewriting the middle of an envelope.
+
+## Pitch and feedback
+
+**Pitch:** -36 to +36 semitones. **Voice Detune:** up to +/-100 cents across the voice layers. **Random Pitch:** up to +/-24 semitones per grain. Pitch changes the interpolated source playback rate independently of the grain lifetime. Beat pitch and detune edits also affect already-held or frozen slices; Texture pitch settings are captured by each new grain. Scales are Off, Chromatic, Major, Minor, Fifths, and Octaves, with a selectable root. Snapping applies to semitone offsets before fine detune; it does not detect or correct the input's fundamental or preserve vocal formants.
+
+**Feedback** returns up to 95% of the wet output through a high-pass, low-pass and tanh saturation stage to the recording input. **Feedback Saturation** supplies 0-24 dB drive. Filters are clamped below the actual sample-rate Nyquist limit. Dry/Wet does not affect the feedback tap. Freeze stops new buffer recording; transport stop clears the feedback state. Saturation bounds regeneration, but high feedback is deliberately capable of strong, dense effects.
+
+## Motion and routing
+
+Two LFOs have independent free-Hz / tempo-synced rates and Sine, Triangle, Saw, or Square waveforms. Synced phases follow host PPQ, including loops and negative timeline positions; standalone timing uses the fallback clock. The **Envelope Follower** has attack, release and gain controls and follows the dry input peak. The **Step Sequencer** has 1-16 steps, a synced step division, and sixteen bipolar value sliders. **Smooth Random** glides between deterministic random targets at an adjustable rate.
+
+The **Mod Matrix** has eight source / target / signed-depth routes. Sources are LFO 1, LFO 2, Follower, Sequencer and Smooth Random. Targets include all sound knobs, AHDSR stages and curves, LFO rates, follower settings and sequence steps. The unit-specific versions of dual-mode knobs appear separately: choose the active ms or sync destination. Routing selectors and route depths are not recursive destinations. Follower is unipolar; other sources are bipolar. Multiple routes add in normalized parameter space and clamp to the target range. The saved base value stays unchanged. A 32-sample control clock is independent of audio block size; LFO/follower phases are advanced per sample.
+
+## Practical limits
+
+Texture allows 16 simultaneous grains per voice / 256 total at 44.1-48 kHz, 8 per voice at 88.2-96 kHz, and 4 per voice at 192 kHz. These sample-rate-aware limits bound the render cost. Excess launches are skipped rather than allocating or stealing a sounding grain; the waveform displays an overlap-limit message. Reduce Size, Density or Voices if this occurs. Long grains whose source window is overwritten retire with a 5 ms fade; Freeze retains source material indefinitely. Keep Buffer Length comfortably longer than the grain for sustained live clouds.
+
+Grain buffers are preallocated outside the audio callback. The original 16-voice Beat caches and event storage reserve about 976 MiB at 48 kHz; only active cache data is touched. The shared Texture history adds about 27 MiB. Audio storage scales with sample rate; short normal grains use much less physical cache memory than the reserved maximum. Interpolated resampling is intended for granular pitch effects, not formant-preserving or alias-free spectral pitch correction. Dense 16-voice clouds require more CPU than sparse Beat repeats. The Release cloud-only stress benchmark on the development machine processed one second of 48 kHz stereo with 256 active pitched grains in approximately 0.44 seconds; this is not a host CPU or audio-driver latency measurement.
+
+## Build and check on Windows
+
+Requires a local JUCE checkout in `JUCE/` (ignored by Git), CMake 3.22+, Visual Studio 2022 C++ tools, and a Windows SDK.
 
 ```powershell
 cmake -S . -B build -DRICE_BUILD_TESTS=ON
-cmake --build build --config Debug --target rice_VST3 rice_Standalone rice_engine_tests rice_plugin_tests --parallel 4
-ctest --test-dir build -C Debug --output-on-failure
+cmake --build build --config Release --target rice_VST3 rice_Standalone rice_engine_tests rice_advanced_tests rice_plugin_tests --parallel 4
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-Outputs:
+- VST3 bundle: `build/rice_artefacts/Release/VST3/rice.vst3`
+- Standalone: `build/rice_artefacts/Release/Standalone/rice.exe`
 
-- VST3 bundle: `build/rice_artefacts/Debug/VST3/rice.vst3`
-- Standalone app: `build/rice_artefacts/Debug/Standalone/rice.exe`
+Copy the entire VST3 bundle into a folder scanned by your DAW, then rescan. Nothing is installed automatically. Replace Release with Debug for development builds.
 
-For a DAW, copy the entire `rice.vst3` bundle into a VST3 folder scanned by your host, then rescan. Nothing is installed automatically. For optimized builds, replace `Debug` with `Release` in the build command and output paths.
+Checks cover original Beat sample order and transport behavior, live first passes, signed position audio, AHDSR boundaries and compiled-curve agreement, independent overlap/capture clocks, freeze and restart, frequency changes at +/-12 semitones, scale snapping, maximum grain-pool bounds, normalisation, modulation sources/routing, callback allocations, variable block sizes, feedback stability, exact dry endpoints, all-parameter state round trips, unit switching, envelope mouse gestures and tab rendering. UI renders are `build/rice-ui.png` and `build/rice-tab-1.png` through `rice-tab-4.png`. A plugin validator, DAW-specific automation and listening tests are still useful before distributing a release.
 
-Try a drum loop with a 50-100 ms grain, a synced `1/8` capture interval, and Back-and-forth playback. Then switch capture to Transient and raise sensitivity to refresh on attacks. Future versions can add envelopes, additional voices, panning, detune, and texture processing.
+## Starting sounds
 
-## Validation
+- **Beat chop:** Beat 0%, 50 ms size, synced 1/8 captures, Straight, one voice.
+- **Texture cloud:** Texture 100%, 100 ms size, 20 grains/s, four voices, Spread 80%, Attack 10 / Hold 0 / Decay 20 / Sustain 70% / Release 40 ms.
+- **Frozen harmony:** record a phrase, Freeze, Texture 100%, scale Fifths, Random Pitch 12 st, Detune 10 cents, slow Scan.
+- **Feedback cascade:** Texture 70%, Pitch +7 st, Feedback 40%, high-pass 100 Hz, low-pass 5 kHz, gentle saturation; modulate Position with a slow synced LFO.
 
-The offline engine checks cover the original playback/transport/timing behavior plus 16-voice normalisation, voice-count automation, independent signed random draws, position-shifted source audio, stereo spread, random sync timing through tempo ramps, and clearing history on stop/restart. Plugin integration checks exercise parameter/state restoration (including older sessions), transport forwarding, eight visible knobs, random-knob unit rebinding, dry/wet endpoints and midpoint, mix automation smoothing, and exact dry mono/stereo passthrough. They also render `build/rice-ui.png` for visual inspection. Listening and DAW-specific automation testing remain necessary when evaluating the sound.
+The capture / release / buffer distinction and modulation workflow were informed by [Arturia's Efx FRAGMENTS overview](https://www.arturia.com/products/software-effects/efx-fragments/overview). Rhythmic source handling and effect-control conventions were checked against [Ableton's audio effect reference](https://www.ableton.com/en/manual/live-audio-effect-reference/). Rice uses its own DSP and envelope implementation rather than reproducing either product.
